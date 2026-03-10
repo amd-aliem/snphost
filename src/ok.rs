@@ -679,7 +679,30 @@ fn collect_single_test_result(test: &Test, mask: usize) -> (HierarchicalTestResu
                 summary,
             )
         }
-        TestState::Skip => unreachable!(),
+        // TestState::Skip should never be returned by test functions directly.
+        // Tests are skipped by the generation mask check above, not by the test itself.
+        // This matches the behavior of the original run_test() function.
+        TestState::Skip => {
+            // Handle defensively: treat as skipped
+            summary.skipped = 1;
+            let mut sub_tests = Vec::new();
+            for sub in &test.sub {
+                let (sub_result, sub_summary) = mark_test_skipped(sub);
+                sub_tests.push(sub_result);
+                summary.total += sub_summary.total;
+                summary.skipped += sub_summary.skipped;
+            }
+
+            (
+                HierarchicalTestResult {
+                    name: res.name,
+                    status: res.stat,
+                    message: res.mesg,
+                    sub_tests,
+                },
+                summary,
+            )
+        }
     }
 }
 
