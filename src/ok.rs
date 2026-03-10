@@ -12,6 +12,7 @@ use std::{
 };
 
 use colorful::*;
+use serde::Serialize;
 
 use msru::{Accessor, Msr};
 
@@ -29,13 +30,43 @@ struct Test {
     sub: Vec<Test>,
 }
 
+#[derive(Serialize)]
 struct TestResult {
     name: String,
     stat: TestState,
+    #[serde(skip_serializing_if = "Option::is_none")]
     mesg: Option<String>,
 }
 
-#[derive(PartialEq, Eq)]
+// Structure for hierarchical test results used in JSON output
+#[derive(Serialize)]
+struct HierarchicalTestResult {
+    name: String,
+    status: TestState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sub_tests: Vec<HierarchicalTestResult>,
+}
+
+// Summary statistics for test results
+#[derive(Serialize, Clone)]
+struct TestSummary {
+    total: usize,
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+}
+
+// Top-level JSON output structure
+#[derive(Serialize)]
+struct JsonOutput {
+    summary: TestSummary,
+    tests: Vec<HierarchicalTestResult>,
+}
+
+#[derive(PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 enum TestState {
     Pass,
     Skip,
@@ -477,15 +508,38 @@ fn collect_tests() -> Vec<Test> {
 
 const INDENT: usize = 2;
 
-pub fn cmd(quiet: bool) -> Result<()> {
+pub fn cmd(quiet: bool, json: bool) -> Result<()> {
     let tests = collect_tests();
 
-    if run_test(&tests, 0, quiet, SEV_MASK | ES_MASK | SNP_MASK) {
-        Ok(())
+    if json {
+        // Collect results hierarchically for JSON output
+        let (results, summary) = collect_test_results(&tests, SEV_MASK | ES_MASK | SNP_MASK);
+        let has_failures = summary.failed > 0;
+        let output = JsonOutput {
+            summary,
+            tests: results,
+        };
+
+        // Output JSON - not affected by quiet flag when json is enabled
+        println!("{}", serde_json::to_string_pretty(&output)?);
+
+        // Return error if any tests failed
+        if has_failures {
+            Err(anyhow::anyhow!(
+                "One or more tests in snphost ok reported a failure"
+            ))
+        } else {
+            Ok(())
+        }
     } else {
-        Err(anyhow::anyhow!(
-            "One or more tests in snphost ok reported a failure"
-        ))
+        // Original text output mode
+        if run_test(&tests, 0, quiet, SEV_MASK | ES_MASK | SNP_MASK) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "One or more tests in snphost ok reported a failure"
+            ))
+        }
     }
 }
 
@@ -517,6 +571,144 @@ fn run_test(tests: &[Test], level: usize, quiet: bool, mask: usize) -> bool {
     }
 
     passed
+}
+
+// Collect test results hierarchically for JSON output
+fn collect_test_results(tests: &[Test], mask: usize) -> (Vec<HierarchicalTestResult>, TestSummary) {
+    let mut results = Vec::new();
+    let mut summary = TestSummary {
+        total: 0,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+    };
+
+    for test in tests {
+        let (result, sub_summary) = collect_single_test_result(test, mask);
+        results.push(result);
+
+        // Accumulate summary statistics
+        summary.total += sub_summary.total;
+        summary.passed += sub_summary.passed;
+        summary.failed += sub_summary.failed;
+        summary.skipped += sub_summary.skipped;
+    }
+
+    (results, summary)
+}
+
+// Collect a single test result and its sub-tests
+fn collect_single_test_result(test: &Test, mask: usize) -> (HierarchicalTestResult, TestSummary) {
+    let mut summary = TestSummary {
+        total: 1,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+    };
+
+    // Check if test should be skipped due to generation mask
+    if (test.gen_mask & mask) != test.gen_mask {
+        summary.skipped = 1;
+        summary.passed = 0;
+
+        let mut sub_tests = Vec::new();
+        for sub in &test.sub {
+            let (sub_result, sub_summary) = collect_single_test_result(sub, mask);
+            sub_tests.push(sub_result);
+            summary.total += sub_summary.total;
+            summary.skipped += sub_summary.skipped;
+        }
+
+        return (
+            HierarchicalTestResult {
+                name: test.name.to_string(),
+                status: TestState::Skip,
+                message: None,
+                sub_tests,
+            },
+            summary,
+        );
+    }
+
+    // Run the test
+    let res = (test.run)();
+
+    // Update summary based on result
+    match res.stat {
+        TestState::Pass => {
+            summary.passed = 1;
+            // Collect sub-tests for passing tests
+            let mut sub_tests = Vec::new();
+            for sub in &test.sub {
+                let (sub_result, sub_summary) = collect_single_test_result(sub, mask);
+                sub_tests.push(sub_result);
+                summary.total += sub_summary.total;
+                summary.passed += sub_summary.passed;
+                summary.failed += sub_summary.failed;
+                summary.skipped += sub_summary.skipped;
+            }
+
+            (
+                HierarchicalTestResult {
+                    name: res.name,
+                    status: res.stat,
+                    message: res.mesg,
+                    sub_tests,
+                },
+                summary,
+            )
+        }
+        TestState::Fail => {
+            summary.failed = 1;
+            // Mark all sub-tests as skipped for failed tests
+            let mut sub_tests = Vec::new();
+            for sub in &test.sub {
+                let (sub_result, sub_summary) = mark_test_skipped(sub);
+                sub_tests.push(sub_result);
+                summary.total += sub_summary.total;
+                summary.skipped += sub_summary.skipped;
+            }
+
+            (
+                HierarchicalTestResult {
+                    name: res.name,
+                    status: res.stat,
+                    message: res.mesg,
+                    sub_tests,
+                },
+                summary,
+            )
+        }
+        TestState::Skip => unreachable!(),
+    }
+}
+
+// Mark a test and all its sub-tests as skipped
+fn mark_test_skipped(test: &Test) -> (HierarchicalTestResult, TestSummary) {
+    let mut summary = TestSummary {
+        total: 1,
+        passed: 0,
+        failed: 0,
+        skipped: 1,
+    };
+
+    let mut sub_tests = Vec::new();
+    for sub in &test.sub {
+        let (sub_result, sub_summary) = mark_test_skipped(sub);
+        sub_tests.push(sub_result);
+        summary.total += sub_summary.total;
+        summary.skipped += sub_summary.skipped;
+    }
+
+    (
+        HierarchicalTestResult {
+            name: test.name.to_string(),
+            status: TestState::Skip,
+            message: None,
+            sub_tests,
+        },
+        summary,
+    )
 }
 
 fn emit_result(res: &TestResult, level: usize, quiet: bool) {

@@ -1,0 +1,180 @@
+{
+  "summary": {
+    "total": 26,
+    "passed": 24,
+    "failed": 0,
+    "skipped": 2
+  },
+  "tests": [
+    {
+      "name": "AMD CPU",
+      "status": "pass",
+      "sub_tests": [
+        {
+          "name": "Microcode support",
+          "status": "pass",
+          "sub_tests": []
+        }
+      ]
+    },
+    {
+      "name": "Secure Memory Encryption (SME)",
+      "status": "pass",
+      "sub_tests": [
+        {
+          "name": "SME: Enabled in MSR",
+          "status": "pass",
+          "sub_tests": []
+        }
+      ]
+    },
+    {
+      "name": "Secure Encrypted Virtualization (SEV)",
+      "status": "pass",
+      "sub_tests": [
+        {
+          "name": "SEV firmware version",
+          "status": "pass",
+          "message": "1.55",
+          "sub_tests": []
+        },
+        {
+          "name": "Encrypted State (SEV-ES)",
+          "status": "pass",
+          "sub_tests": [
+            {
+              "name": "SEV-ES initialized",
+              "status": "pass",
+              "sub_tests": []
+            }
+          ]
+        },
+        {
+          "name": "SEV initialized",
+          "status": "pass",
+          "message": "Initialized, no guests running",
+          "sub_tests": []
+        },
+        {
+          "name": "Secure Nested Paging (SEV-SNP)",
+          "status": "pass",
+          "sub_tests": [
+            {
+              "name": "VM Permission Levels",
+              "status": "pass",
+              "sub_tests": [
+                {
+                  "name": "Number of VMPLs",
+                  "status": "pass",
+                  "message": "4",
+                  "sub_tests": []
+                }
+              ]
+            },
+            {
+              "name": "SNP: Enabled in MSR",
+              "status": "pass",
+              "sub_tests": []
+            },
+            {
+              "name": "SNP initialized",
+              "status": "pass",
+              "sub_tests": [
+                {
+                  "name": "RMP table addresses",
+                  "status": "pass",
+                  "message": "0x18278900000 - 0x183fc9fffff",
+                  "sub_tests": []
+                },
+                {
+                  "name": "RMP table initialized",
+                  "status": "pass",
+                  "sub_tests": []
+                },
+                {
+                  "name": "Alias check",
+                  "status": "pass",
+                  "message": "Completed since last system update, no aliasing addresses",
+                  "sub_tests": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Physical address bit reduction",
+          "status": "pass",
+          "message": "6",
+          "sub_tests": []
+        },
+        {
+          "name": "C-bit location",
+          "status": "pass",
+          "message": "51",
+          "sub_tests": []
+        },
+        {
+          "name": "Number of encrypted guests supported simultaneously",
+          "status": "pass",
+          "message": "1006",
+          "sub_tests": []
+        },
+        {
+          "name": "Minimum ASID value for SEV-enabled, SEV-ES disabled guest",
+          "status": "pass",
+          "message": "500",
+          "sub_tests": []
+        },
+        {
+          "name": "/dev/sev readable",
+          "status": "pass",
+          "sub_tests": []
+        },
+        {
+          "name": "/dev/sev writable",
+          "status": "pass",
+          "sub_tests": []
+        }
+      ]
+    },
+    {
+      "name": "Page flush MSR",
+      "status": "pass",
+      "message": "DISABLED",
+      "sub_tests": []
+    },
+    {
+      "name": "KVM supported",
+      "status": "pass",
+      "message": "API version: 12",
+      "sub_tests": [
+        {
+          "name": "SEV enabled in KVM",
+          "status": "pass",
+          "sub_tests": []
+        },
+        {
+          "name": "SEV-ES enabled in KVM",
+          "status": "pass",
+          "sub_tests": []
+        },
+        {
+          "name": "SEV-SNP enabled in KVM",
+          "status": "pass",
+          "sub_tests": []
+        }
+      ]
+    },
+    {
+      "name": "Memlock resource limit",
+      "status": "pass",
+      "message": "Soft: 202050342912 | Hard: 202050342912",
+      "sub_tests": []
+    },
+    {
+      "name": "Comparing TCB values",
+      "status": "pass",
+      "sub_tests": []
+    }
+  ]
+}

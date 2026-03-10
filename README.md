@@ -76,8 +76,28 @@ Probes host system to confirm SEV-SNP support.
 **Usage:**
 
 ```sh
+snphost ok [OPTIONS]
+```
+
+**Options:**
+
+- `--json` - Output results in JSON format for machine-readable parsing
+
+**Examples:**
+
+Standard text output:
+```sh
 snphost ok
 ```
+
+JSON output:
+```sh
+snphost ok --json
+```
+
+The JSON output provides a structured, hierarchical representation of all test results with a summary of passed, failed, and skipped tests. This format is ideal for automated processing and integration with other tools.
+
+See [docs/json-output-example.json](docs/json-output-example.json) for a sample of the JSON output format.
 
 ### 5. `fetch`
 
