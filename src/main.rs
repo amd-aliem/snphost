@@ -42,7 +42,7 @@ enum SnpHostCmd {
     Import(import::Import),
 
     /// Probe system for SEV-SNP support
-    Ok,
+    Ok(ok::OkArgs),
 
     /// Modify the SNP configuration
     #[command(subcommand)]
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
         SnpHostCmd::Show(show) => show::cmd(show),
         SnpHostCmd::Export(export) => export::cmd(export),
         SnpHostCmd::Import(import) => import::cmd(import),
-        SnpHostCmd::Ok => ok::cmd(snphost.quiet),
+        SnpHostCmd::Ok(args) => ok::cmd(snphost.quiet, args),
         SnpHostCmd::Config(subcmd) => config::cmd(subcmd),
         SnpHostCmd::Verify(verify) => verify::cmd(verify, snphost.quiet),
         SnpHostCmd::Fetch(fetch) => fetch::cmd(fetch),
@@ -106,11 +106,12 @@ fn main() -> Result<()> {
         SnpHostCmd::VlekLoad(load) => vlek_load::cmd(load),
     };
 
-    if !snphost.quiet {
-        if let Err(ref e) = result {
+    if let Err(ref e) = result {
+        if !snphost.quiet {
             eprintln!("ERROR: {}", e);
         }
+        std::process::exit(1);
     }
 
-    result
+    Ok(())
 }
