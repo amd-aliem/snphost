@@ -1035,10 +1035,97 @@ fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
     }
 }
 
+/// Flatten the result tree into a list of nodes for grouping by category.
+fn flatten_results(results: &[TestResultNode]) -> Vec<&TestResultNode> {
+    let mut flat = Vec::new();
+    for r in results {
+        flat.push(r);
+        flat.extend(flatten_results(&r.children));
+    }
+    flat
+}
+
+/// Verbose mode: tests grouped by category with descriptions and recommended actions.
 fn render_verbose(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
-    render_default(results);
-    println!();
-    render_software_versions(sw_versions);
+    let flat = flatten_results(results);
+
+    // Group by category (sorted by enum order since TestCategory derives Ord).
+    let categories = [
+        TestCategory::CpuSupport,
+        TestCategory::CpuInfo,
+        TestCategory::BiosConfigured,
+        TestCategory::PlatformInitialized,
+        TestCategory::KvmConfig,
+        TestCategory::Compliance,
+    ];
+
+    for cat in &categories {
+        let in_cat: Vec<&&TestResultNode> = flat.iter().filter(|n| n.category == *cat).collect();
+        if in_cat.is_empty() {
+            continue;
+        }
+        println!("{}:", cat);
+        for node in &in_cat {
+            let msg = match &node.mesg {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            };
+            println!("  [ {:^4} ] {}{}", format!("{}", node.stat), node.name, msg);
+            if let Some(desc) = &node.description {
+                println!("           {}", desc);
+            }
+            if node.stat == TestState::Fail {
+                if let Some(hint) = &node.fix_hint {
+                    println!(
+                        "           {} {}",
+                        "Recommended action:".red(),
+                        hint
+                    );
+                }
+            }
+        }
+        println!();
+    }
+
+    // Software versions section
+    println!("Installed Components:");
+    for v in sw_versions {
+        let stat_display = match v.status {
+            SwVersionStatus::Supported => TestState::Pass,
+            SwVersionStatus::TooOld => TestState::Fail,
+            SwVersionStatus::PermissionDenied => TestState::Fail,
+            SwVersionStatus::NotInstalled => TestState::Skip,
+            SwVersionStatus::Unknown => TestState::Skip,
+        };
+        let ver = v.installed_version.as_deref().unwrap_or("N/A");
+        let min_str = match &v.min_version {
+            Some(m) => format!(" (min: {})", m),
+            None => String::new(),
+        };
+        let detail = match v.status {
+            SwVersionStatus::NotInstalled => format!("Not installed{}", min_str),
+            SwVersionStatus::PermissionDenied => format!("Permission denied{}", min_str),
+            _ => format!("{}{}", ver, min_str),
+        };
+        println!("  [ {:^4} ] {}: {}", format!("{}", stat_display), v.component, detail);
+    }
+
+    // DETECTED ISSUES summary
+    let failures = collect_failures(results);
+    if !failures.is_empty() {
+        println!();
+        println!("DETECTED ISSUES:");
+        for f in &failures {
+            let msg = match &f.mesg {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            };
+            println!("  * {}{}", f.name, msg);
+            if let Some(hint) = &f.fix_hint {
+                println!("    -> {}", hint);
+            }
+        }
+    }
 }
 
 fn render_json(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
