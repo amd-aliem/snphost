@@ -63,7 +63,8 @@ impl OkArgs {
     }
 }
 
-/// Accumulated result entry for post-processing by non-default renderers
+/// Accumulated result entry for post-processing by non-default renderers.
+/// The `name` field contains the plain test name (no ANSI codes) for JSON/metadata lookup.
 struct TestResultEntry {
     name: String,
     status: String, // "PASS", "FAIL", "SKIP"
@@ -101,6 +102,24 @@ struct TestMetadata {
     label: &'static str,
     description: &'static str,
     fix_hint: &'static str,
+}
+
+const MSR_HINT: &str = "Load MSR kernel module: sudo modprobe msr";
+const SUDO_HINT: &str = "Run with sudo: sudo snphost ok";
+
+/// Returns the appropriate fix hint for a failed test. Overrides the
+/// metadata hint when the failure is clearly an access/module issue
+/// rather than a BIOS configuration problem.
+fn effective_hint(meta: &TestMetadata, message: &Option<String>) -> &'static str {
+    if let Some(m) = message {
+        if m.contains("MSR read failed") || m.contains("Failed to read the desired MSR") {
+            return MSR_HINT;
+        }
+        if m.contains("unable to open /dev/sev") || m.contains("Permission denied") {
+            return SUDO_HINT;
+        }
+    }
+    meta.fix_hint
 }
 
 /// Look up metadata for a test by its name.
@@ -199,7 +218,7 @@ fn test_metadata(name: &str) -> TestMetadata {
         },
         "Alias check" => TestMetadata {
             category: TestCategory::Compliance,
-            label: "",
+            label: "(Compliance)",
             description: "Queries SNP platform status ALIAS_CHECK_COMPLETE bit (CVE-2024-21944 mitigation)",
             fix_hint: "Update firmware/BIOS per AMD-SB-3015. Reboot required",
         },
@@ -241,7 +260,7 @@ fn test_metadata(name: &str) -> TestMetadata {
         },
         "Memlock resource limit" => TestMetadata {
             category: TestCategory::Compliance,
-            label: "",
+            label: "(Compliance)",
             description: "Reads RLIMIT_MEMLOCK soft and hard limits via getrlimit syscall",
             fix_hint: "Set memlock unlimited in /etc/security/limits.conf",
         },
@@ -277,7 +296,7 @@ fn test_metadata(name: &str) -> TestMetadata {
         },
         _ if name.starts_with("Comparing TCB") || name.starts_with("Compare TCB") => TestMetadata {
             category: TestCategory::Compliance,
-            label: "",
+            label: "(Compliance)",
             description: "Compares platform_tcb_version with reported_tcb_version from SNP_PLATFORM_STATUS",
             fix_hint: "Run: sudo snphost commit or sudo snphost config set-reported-tcb",
         },
@@ -678,7 +697,8 @@ fn collect_tests() -> Vec<Test> {
                     run: Box::new(|| {
                         let res = unsafe { x86_64::__cpuid(0x8000_001f) };
 
-                        let msr_flag = if ((res.eax & 0x1) << 2) != 0 {
+                        let enabled = (res.eax & (1 << 2)) != 0;
+                        let msr_flag = if enabled {
                             "ENABLED".green()
                         } else {
                             "DISABLED".yellow()
@@ -700,7 +720,7 @@ fn collect_tests() -> Vec<Test> {
                              * disabled.
                              */
                             stat: TestState::Pass,
-                            mesg: None,
+                            mesg: Some(if enabled { "ENABLED" } else { "DISABLED" }.to_string()),
                         }
                     }),
                     sub: vec![],
@@ -804,7 +824,7 @@ fn run_test(
             TestState::Skip => "SKIP",
         };
         entries.push(TestResultEntry {
-            name: res.name.clone(),
+            name: t.name.to_string(),
             status: status_str.to_string(),
             message: res.mesg.clone(),
             level,
@@ -887,10 +907,11 @@ fn render_short(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], _p
                     Some(m) => format!(": {}", m),
                     None => String::new(),
                 };
-                let hint = if meta.fix_hint.is_empty() {
+                let hint_str = effective_hint(&meta, &e.message);
+                let hint = if hint_str.is_empty() {
                     String::new()
                 } else {
-                    format!("\n    ^ hint: {}", meta.fix_hint)
+                    format!("\n    ^ {} {}", "Hint:".blue(), hint_str)
                 };
                 println!("  {} {}{}{}{}", "FAIL".red(), e.name, label, msg, hint);
             }
@@ -910,11 +931,34 @@ fn render_short(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], _p
         }
     }
 
+    // Show skipped items
+    let skipped_tests: Vec<&TestResultEntry> = entries.iter().filter(|e| e.status == "SKIP").collect();
+    let sw_skipped: Vec<&SoftwareVersion> = sw_versions
+        .iter()
+        .filter(|v| v.status == "optional_missing")
+        .collect();
+    if !skipped_tests.is_empty() || !sw_skipped.is_empty() {
+        println!("\n{}:", "SKIPPED".yellow());
+        for s in &skipped_tests {
+            println!("  [{}] {}", "SKIP".yellow(), s.name);
+        }
+        for v in &sw_skipped {
+            println!("  [{}] {} (Software)", "SKIP".yellow(), v.name);
+        }
+    }
+
+    let sw_pass = sw_versions.iter().filter(|v| v.status == "ok").count();
+    let sw_fail = sw_versions.iter().filter(|v| v.status == "too_old" || v.status == "missing").count();
+    let sw_skip = sw_versions.iter().filter(|v| v.status == "optional_missing").count();
+
     println!(
         "\n{} tests: {} passed, {} failed, {} skipped",
-        total, pass_count, fail_count, skip_count
+        total + sw_versions.len(),
+        pass_count + sw_pass,
+        fail_count + sw_fail,
+        skip_count + sw_skip,
     );
-    if fail_count == 0 {
+    if fail_count == 0 && sw_fail == 0 {
         println!("{}", "All tests passed.".green());
     }
 }
@@ -947,35 +991,50 @@ fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) 
                 _ => format!("{}", "SKIP".yellow()),
             };
             let msg = match &e.message {
-                Some(m) => format!(": {}", m),
+                Some(m) => {
+                    // Indent continuation lines to align under the test name
+                    let indented = m.replace('\n', "\n             ");
+                    format!(": {}", indented.trim())
+                }
                 None => String::new(),
             };
             println!("  [ {:^4} ] {}{}", status_colored, e.name, msg);
             if !meta.description.is_empty() {
                 println!("           {}", meta.description);
             }
-            if e.status == "FAIL" && !meta.fix_hint.is_empty() {
+            let hint_str = effective_hint(&meta, &e.message);
+            if e.status == "FAIL" && !hint_str.is_empty() {
                 println!(
                     "           {} {}",
                     "Recommended:".yellow(),
-                    meta.fix_hint
+                    hint_str
                 );
             }
         }
     }
 
     // Software versions
-    println!("\n=== Software Versions ===");
+    println!("\n=== Installed Components ===");
     for v in sw_versions {
-        let ver_str = v.version.as_deref().unwrap_or("not found");
-        let status_icon = match v.status.as_str() {
-            "ok" => format!("{}", "ok".green()),
-            "too_old" => format!("{}", "too old".red()),
-            "missing" => format!("{}", "missing".red()),
-            "optional_missing" => format!("{}", "not found".yellow()),
-            _ => v.status.clone(),
+        let stat = match v.status.as_str() {
+            "ok" => format!("{}", "PASS".green()),
+            "too_old" => format!("{}", "FAIL".red()),
+            "missing" => format!("{}", "SKIP".yellow()),
+            "optional_missing" => format!("{}", "SKIP".yellow()),
+            _ => format!("{}", "SKIP".yellow()),
         };
-        println!("  {}: {} ({})", v.name, ver_str, status_icon);
+        let ver_str = v.version.as_deref().unwrap_or("not found");
+        // Extract min version from detail (e.g. "kernel >= 6.11")
+        let min_str = if let Some(pos) = v.detail.find(">=") {
+            format!(" (min: {})", v.detail[pos + 2..].trim())
+        } else {
+            String::new()
+        };
+        let detail = match v.status.as_str() {
+            "missing" | "optional_missing" => format!("Not installed{}", min_str),
+            _ => format!("{}{}", ver_str, min_str),
+        };
+        println!("  [ {:^4} ] {}: {}", stat, v.name, detail);
     }
 
     // Detected Issues summary
@@ -992,12 +1051,11 @@ fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) 
         println!("\n{}", "=== DETECTED ISSUES ===".red());
         for (i, e) in issues.iter().enumerate() {
             let meta = test_metadata(&e.name);
-            let action = if meta.fix_hint.is_empty() {
-                String::new()
-            } else {
-                format!(" -> {}", meta.fix_hint)
-            };
-            println!("  {}. {} [FAIL]{}", i + 1, e.name, action);
+            let hint_str = effective_hint(&meta, &e.message);
+            println!("  {}. {} [FAIL]", i + 1, e.name);
+            if !hint_str.is_empty() {
+                println!("     {} {}", "Hint:".blue(), hint_str);
+            }
         }
         for v in &sw_issues {
             let ver_str = v.version.as_deref().unwrap_or("not found");
@@ -1006,49 +1064,171 @@ fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) 
                 v.name, ver_str, v.detail
             );
         }
+        println!();
+        println!("For detailed troubleshooting, see: https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md");
     } else {
         println!("\n{}", "No issues detected.".green());
     }
 }
 
-fn render_json(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], passed: bool) {
-    let fail_count = entries.iter().filter(|e| e.status == "FAIL").count();
-    let pass_count = entries.iter().filter(|e| e.status == "PASS").count();
-    let skip_count = entries.iter().filter(|e| e.status == "SKIP").count();
+fn category_to_snake(cat: &TestCategory) -> &'static str {
+    match cat {
+        TestCategory::CpuSupport => "cpu_support",
+        TestCategory::CpuInfo => "cpu_info",
+        TestCategory::BiosConfigured => "bios_configured",
+        TestCategory::PlatformInitialized => "platform_initialized",
+        TestCategory::KvmConfig => "kvm_config",
+        TestCategory::Compliance => "compliance",
+    }
+}
 
-    let results: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            let meta = test_metadata(&e.name);
-            let mut obj = serde_json::json!({
-                "name": e.name,
-                "status": e.status,
-                "category": format!("{}", meta.category),
-                "level": e.level,
+fn entry_to_json(e: &TestResultEntry) -> serde_json::Value {
+    let meta = test_metadata(&e.name);
+    let is_tcb = e.name.starts_with("Comparing TCB") || e.name.starts_with("Compare TCB");
+
+    let mut obj = serde_json::json!({
+        "name": e.name,
+        "status": e.status.to_lowercase(),
+        "category": category_to_snake(&meta.category),
+    });
+    if !meta.label.is_empty() {
+        // Strip parentheses from label for JSON
+        let label = meta.label.trim_start_matches('(').trim_end_matches(')');
+        obj["label"] = serde_json::json!(label);
+    }
+    if is_tcb {
+        // Short message instead of raw multi-line dump
+        if let Some(m) = &e.message {
+            obj["message"] = if m.starts_with("TCB versions match") {
+                serde_json::json!("TCB versions match")
+            } else {
+                serde_json::json!("TCB versions do NOT match")
+            };
+        }
+        // Add structured TCB data
+        if let Ok(status) = snp_platform_status() {
+            let tcb = &status.platform_tcb_version;
+            let rtcb = &status.reported_tcb_version;
+            obj["tcb"] = serde_json::json!({
+                "versions_match": tcb == rtcb,
+                "platform": {
+                    "microcode": tcb.microcode,
+                    "snp": tcb.snp,
+                    "tee": tcb.tee,
+                    "boot_loader": tcb.bootloader,
+                    "fmc": tcb.fmc,
+                },
+                "reported": {
+                    "microcode": rtcb.microcode,
+                    "snp": rtcb.snp,
+                    "tee": rtcb.tee,
+                    "boot_loader": rtcb.bootloader,
+                    "fmc": rtcb.fmc,
+                },
             });
-            if let Some(m) = &e.message {
-                obj["message"] = serde_json::json!(m);
+        }
+    } else if let Some(m) = &e.message {
+        obj["message"] = serde_json::json!(m);
+    }
+    if !meta.description.is_empty() {
+        obj["description"] = serde_json::json!(meta.description);
+    }
+    let hint_str = effective_hint(&meta, &e.message);
+    if !hint_str.is_empty() {
+        obj["fix_hint"] = serde_json::json!(hint_str);
+    }
+    obj
+}
+
+/// Build a hierarchical JSON tree from a flat list of entries using their level field.
+fn build_json_tree(entries: &[TestResultEntry]) -> Vec<serde_json::Value> {
+    let mut root: Vec<serde_json::Value> = Vec::new();
+    // Stack of (level, index into parent's children array)
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+
+    for e in entries {
+        let node = entry_to_json(e);
+
+        // Pop stack until we find the parent level
+        while let Some(&(lvl, _)) = stack.last() {
+            if lvl >= e.level {
+                stack.pop();
+            } else {
+                break;
             }
-            if !meta.description.is_empty() {
-                obj["description"] = serde_json::json!(meta.description);
+        }
+
+        if stack.is_empty() {
+            // Top-level node
+            root.push(node);
+            let idx = root.len() - 1;
+            stack.push((e.level, idx));
+        } else {
+            // Find the parent node by traversing the tree
+            let mut parent = &mut root[stack[0].1];
+            for &(_, idx) in stack.iter().skip(1) {
+                parent = &mut parent["children"][idx];
             }
-            if e.status == "FAIL" && !meta.fix_hint.is_empty() {
-                obj["fix_hint"] = serde_json::json!(meta.fix_hint);
+            if parent.get("children").is_none() {
+                parent["children"] = serde_json::json!([]);
             }
-            obj
-        })
-        .collect();
+            parent["children"].as_array_mut().unwrap().push(node);
+            let child_idx = parent["children"].as_array().unwrap().len() - 1;
+            stack.push((e.level, child_idx));
+        }
+    }
+
+    root
+}
+
+fn sw_to_json(v: &SoftwareVersion) -> serde_json::Value {
+    let status = match v.status.as_str() {
+        "ok" => "supported",
+        "too_old" => "too_old",
+        "missing" => "not_installed",
+        "optional_missing" => "not_installed",
+        _ => "unknown",
+    };
+    let mut obj = serde_json::json!({
+        "component": v.name,
+        "status": status,
+    });
+    if let Some(ver) = &v.version {
+        obj["installed_version"] = serde_json::json!(ver);
+    }
+    // Extract min version from detail string (e.g. "kernel >= 6.11")
+    if let Some(pos) = v.detail.find(">=") {
+        let min = v.detail[pos + 2..].trim().to_string();
+        obj["min_version"] = serde_json::json!(min);
+    }
+    obj
+}
+
+fn render_json(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], _passed: bool) {
+    let mut pass_count = entries.iter().filter(|e| e.status == "PASS").count();
+    let mut fail_count = entries.iter().filter(|e| e.status == "FAIL").count();
+    let mut skip_count = entries.iter().filter(|e| e.status == "SKIP").count();
+    for v in sw_versions {
+        match v.status.as_str() {
+            "ok" => pass_count += 1,
+            "too_old" | "missing" => fail_count += 1,
+            _ => skip_count += 1,
+        }
+    }
+
+    let tests = build_json_tree(entries);
+    let software: Vec<serde_json::Value> = sw_versions.iter().map(sw_to_json).collect();
 
     let output = serde_json::json!({
-        "results": results,
-        "software_versions": sw_versions,
+        "tests": tests,
+        "software": software,
         "summary": {
-            "total": entries.len(),
             "passed": pass_count,
             "failed": fail_count,
             "skipped": skip_count,
-            "overall_pass": passed,
+            "total": pass_count + fail_count + skip_count,
         },
+        "docs": "https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md",
     });
     println!(
         "{}",
@@ -1068,8 +1248,9 @@ fn emit_result(res: &TestResult, level: usize, quiet: bool) {
             Some(m) => format!(": {}", m),
             None => "".to_string(),
         };
-        let hint = if res.stat == TestState::Fail && !meta.fix_hint.is_empty() {
-            format!("\n{:width$}  ^ hint: {}", "", meta.fix_hint, width = level + 10)
+        let hint_str = effective_hint(&meta, &res.mesg);
+        let hint = if res.stat == TestState::Fail && !hint_str.is_empty() {
+            format!("\n{:width$}  ^ {} {}", "", "Hint:".blue(), hint_str, width = level + 10)
         } else {
             String::new()
         };
@@ -1551,7 +1732,7 @@ fn check_qemu_version() -> SoftwareVersion {
             // e.g. "QEMU emulator version 8.2.2 ..."
             let ver = out
                 .split_whitespace()
-                .find(|w| w.chars().next().map_or(false, |c| c.is_ascii_digit()))
+                .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))
                 .unwrap_or("unknown")
                 .to_string();
             let ok = parse_version_ge(&ver, 6, 0);
@@ -1596,7 +1777,7 @@ fn check_libvirt_version() -> SoftwareVersion {
             name,
             version: None,
             status: "optional_missing".to_string(),
-            detail: "virsh not found (optional)".to_string(),
+            detail: "virsh not found (optional, >= 4.5)".to_string(),
         },
     }
 }
@@ -1604,10 +1785,14 @@ fn check_libvirt_version() -> SoftwareVersion {
 fn check_ovmf_version() -> SoftwareVersion {
     let name = "OVMF".to_string();
     let paths = [
-        "/usr/share/OVMF/OVMF_CODE.fd",
+        // Ubuntu/Debian
+        "/usr/share/ovmf/OVMF.amdsev.fd",
+        "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        // RHEL/Fedora (edk2)
         "/usr/share/edk2/ovmf/OVMF_CODE.fd",
-        "/usr/share/qemu/ovmf-x86_64-smm-ms-code.bin",
         "/usr/share/edk2/x64/OVMF_CODE.fd",
+        // SUSE
+        "/usr/share/qemu/ovmf-x86_64-smm-ms-code.bin",
     ];
     let found = paths.iter().any(|p| std::path::Path::new(p).exists());
     if !found {
@@ -1691,16 +1876,19 @@ fn collect_software_versions() -> Vec<SoftwareVersion> {
 
 /// Print software versions for default mode
 fn print_software_versions(versions: &[SoftwareVersion]) {
-    println!("\n--- Software Versions ---");
     for v in versions {
-        let ver_str = v.version.as_deref().unwrap_or("not found");
-        let status_icon = match v.status.as_str() {
-            "ok" => format!("{}", "ok".green()),
-            "too_old" => format!("{}", "too old".red()),
-            "missing" => format!("{}", "missing".red()),
-            "optional_missing" => format!("{}", "not found".yellow()),
-            _ => v.status.clone(),
+        let stat = match v.status.as_str() {
+            "ok" => format!("{}", "PASS".green()),
+            "too_old" => format!("{}", "FAIL".red()),
+            "missing" => format!("{}", "SKIP".yellow()),
+            "optional_missing" => format!("{}", "SKIP".yellow()),
+            _ => format!("{}", "SKIP".yellow()),
         };
-        println!("  {}: {} ({})", v.name, ver_str, status_icon);
+        let ver_str = v.version.as_deref().unwrap_or("not found");
+        let detail = match v.status.as_str() {
+            "missing" | "optional_missing" => "Not installed".to_string(),
+            _ => ver_str.to_string(),
+        };
+        println!("[ {:^4} ] - {}: {} (Software)", stat, v.name, detail);
     }
 }
