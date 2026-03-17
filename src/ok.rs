@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     mem::{transmute, MaybeUninit},
     os::unix::io::AsRawFd,
+    process::Command,
     str::from_utf8,
 };
 
@@ -758,8 +759,15 @@ pub fn cmd(quiet: bool, args: OkArgs) -> Result<()> {
     let mut entries: Vec<TestResultEntry> = Vec::new();
     let passed = run_test(&tests, 0, suppress_print, SEV_MASK | ES_MASK | SNP_MASK, &mut entries);
 
-    if !quiet && mode != OutputMode::Default {
-        render_output(mode, &entries, passed);
+    let sw_versions = collect_software_versions();
+
+    if !quiet {
+        match mode {
+            OutputMode::Default => {
+                print_software_versions(&sw_versions);
+            }
+            _ => render_output(mode, &entries, &sw_versions, passed),
+        }
     }
 
     if passed {
@@ -844,29 +852,52 @@ fn accumulate_skip_all(tests: &[Test], level: usize, entries: &mut Vec<TestResul
     }
 }
 
-/// Placeholder renderer for non-default output modes
-fn render_output(mode: OutputMode, entries: &[TestResultEntry], _passed: bool) {
+/// Renderer for non-default output modes
+fn render_output(
+    mode: OutputMode,
+    entries: &[TestResultEntry],
+    sw_versions: &[SoftwareVersion],
+    passed: bool,
+) {
     match mode {
-        OutputMode::Short => render_short(entries),
-        OutputMode::Verbose => render_verbose(entries),
-        OutputMode::Json => render_json(entries),
+        OutputMode::Short => render_short(entries, sw_versions, passed),
+        OutputMode::Verbose => render_verbose(entries, sw_versions),
+        OutputMode::Json => render_json(entries, sw_versions, passed),
         OutputMode::Default => {} // handled inline
     }
 }
 
-fn render_short(entries: &[TestResultEntry]) {
-    // Placeholder - will be implemented in a later commit
+fn render_short(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], _passed: bool) {
     let fail_count = entries.iter().filter(|e| e.status == "FAIL").count();
     let pass_count = entries.iter().filter(|e| e.status == "PASS").count();
     let skip_count = entries.iter().filter(|e| e.status == "SKIP").count();
     let total = entries.len();
     for e in entries {
         if e.status == "FAIL" {
+            let meta = test_metadata(&e.name);
             let msg = match &e.message {
                 Some(m) => format!(": {}", m),
                 None => String::new(),
             };
-            println!(" {} {}{}", "FAIL".red(), e.name, msg);
+            let hint = if meta.fix_hint.is_empty() {
+                String::new()
+            } else {
+                format!(" [hint: {}]", meta.fix_hint)
+            };
+            println!(" {} {}{}{}", "FAIL".red(), e.name, msg, hint);
+        }
+    }
+    // Software version issues
+    for v in sw_versions {
+        if v.status != "ok" && v.status != "optional_missing" {
+            let ver_str = v.version.as_deref().unwrap_or("not found");
+            println!(
+                " {} {}: {} ({})",
+                "WARN".yellow(),
+                v.name,
+                ver_str,
+                v.detail
+            );
         }
     }
     println!(
@@ -875,8 +906,7 @@ fn render_short(entries: &[TestResultEntry]) {
     );
 }
 
-fn render_verbose(entries: &[TestResultEntry]) {
-    // Placeholder - will be implemented in a later commit
+fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) {
     for e in entries {
         let status_colored = match e.status.as_str() {
             "PASS" => format!("{}", "PASS".green()),
@@ -887,12 +917,31 @@ fn render_verbose(entries: &[TestResultEntry]) {
             Some(m) => format!(": {}", m),
             None => String::new(),
         };
-        println!("[ {:^4} ] {:width$}- {}{}", status_colored, "", e.name, msg, width = e.level);
+        println!(
+            "[ {:^4} ] {:width$}- {}{}",
+            status_colored,
+            "",
+            e.name,
+            msg,
+            width = e.level
+        );
+    }
+    // Software versions
+    println!("\n--- Software Versions ---");
+    for v in sw_versions {
+        let ver_str = v.version.as_deref().unwrap_or("not found");
+        let status_icon = match v.status.as_str() {
+            "ok" => format!("{}", "ok".green()),
+            "too_old" => format!("{}", "too old".red()),
+            "missing" => format!("{}", "missing".red()),
+            "optional_missing" => format!("{}", "not found".yellow()),
+            _ => v.status.clone(),
+        };
+        println!("  {}: {} ({})", v.name, ver_str, status_icon);
     }
 }
 
-fn render_json(entries: &[TestResultEntry]) {
-    // Placeholder - will be implemented in a later commit
+fn render_json(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], passed: bool) {
     let results: Vec<serde_json::Value> = entries
         .iter()
         .map(|e| {
@@ -905,8 +954,13 @@ fn render_json(entries: &[TestResultEntry]) {
         .collect();
     let output = serde_json::json!({
         "results": results,
+        "software_versions": sw_versions,
+        "overall_pass": passed,
     });
-    println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap_or_default()
+    );
 }
 
 fn emit_result(res: &TestResult, level: usize, quiet: bool) {
@@ -1350,5 +1404,204 @@ fn sev_ioctl(test: SevStatusTests) -> TestResult {
                 mesg: None,
             }
         }
+    }
+}
+
+// ── Software version checks ──────────────────────────────────────────
+
+/// Result of a software version check
+#[derive(Clone, serde::Serialize)]
+struct SoftwareVersion {
+    name: String,
+    version: Option<String>,
+    status: String, // "ok", "too_old", "missing", "optional_missing"
+    detail: String,
+}
+
+fn check_kernel_version() -> SoftwareVersion {
+    let name = "Linux kernel".to_string();
+    match fs::read_to_string("/proc/sys/kernel/osrelease") {
+        Ok(ver) => {
+            let ver = ver.trim().to_string();
+            let ok = parse_version_ge(&ver, 6, 11);
+            SoftwareVersion {
+                name,
+                version: Some(ver),
+                status: if ok { "ok" } else { "too_old" }.to_string(),
+                detail: if ok {
+                    "kernel >= 6.11".to_string()
+                } else {
+                    "Need kernel >= 6.11 for SEV-SNP host support".to_string()
+                },
+            }
+        }
+        Err(_) => SoftwareVersion {
+            name,
+            version: None,
+            status: "missing".to_string(),
+            detail: "Cannot read /proc/sys/kernel/osrelease".to_string(),
+        },
+    }
+}
+
+fn check_qemu_version() -> SoftwareVersion {
+    let name = "QEMU".to_string();
+    match Command::new("qemu-system-x86_64").arg("--version").output() {
+        Ok(output) => {
+            let out = String::from_utf8_lossy(&output.stdout);
+            // e.g. "QEMU emulator version 8.2.2 ..."
+            let ver = out
+                .split_whitespace()
+                .find(|w| w.chars().next().map_or(false, |c| c.is_ascii_digit()))
+                .unwrap_or("unknown")
+                .to_string();
+            let ok = parse_version_ge(&ver, 6, 0);
+            SoftwareVersion {
+                name,
+                version: Some(ver),
+                status: if ok { "ok" } else { "too_old" }.to_string(),
+                detail: if ok {
+                    "qemu >= 6.0".to_string()
+                } else {
+                    "Need QEMU >= 6.0 for SEV-SNP support".to_string()
+                },
+            }
+        }
+        Err(_) => SoftwareVersion {
+            name,
+            version: None,
+            status: "missing".to_string(),
+            detail: "qemu-system-x86_64 not found".to_string(),
+        },
+    }
+}
+
+fn check_libvirt_version() -> SoftwareVersion {
+    let name = "libvirt".to_string();
+    match Command::new("virsh").arg("--version").output() {
+        Ok(output) => {
+            let ver = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let ok = parse_version_ge(&ver, 4, 5);
+            SoftwareVersion {
+                name,
+                version: Some(ver),
+                status: if ok { "ok" } else { "too_old" }.to_string(),
+                detail: if ok {
+                    "libvirt >= 4.5".to_string()
+                } else {
+                    "Need libvirt >= 4.5 for SEV support".to_string()
+                },
+            }
+        }
+        Err(_) => SoftwareVersion {
+            name,
+            version: None,
+            status: "optional_missing".to_string(),
+            detail: "virsh not found (optional)".to_string(),
+        },
+    }
+}
+
+fn check_ovmf_version() -> SoftwareVersion {
+    let name = "OVMF".to_string();
+    let paths = [
+        "/usr/share/OVMF/OVMF_CODE.fd",
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+        "/usr/share/qemu/ovmf-x86_64-smm-ms-code.bin",
+        "/usr/share/edk2/x64/OVMF_CODE.fd",
+    ];
+    let found = paths.iter().any(|p| std::path::Path::new(p).exists());
+    if !found {
+        return SoftwareVersion {
+            name,
+            version: None,
+            status: "missing".to_string(),
+            detail: "OVMF firmware not found".to_string(),
+        };
+    }
+    // Try to get package version
+    let ver = Command::new("dpkg-query")
+        .args(["--showformat=${Version}", "--show", "ovmf"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .or_else(|| {
+            Command::new("rpm")
+                .args(["-q", "--qf", "%{VERSION}", "edk2-ovmf"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        });
+    SoftwareVersion {
+        name,
+        version: ver,
+        status: "ok".to_string(),
+        detail: "OVMF firmware present".to_string(),
+    }
+}
+
+fn check_sev_firmware_version() -> SoftwareVersion {
+    let name = "SEV firmware".to_string();
+    match sev_platform_status() {
+        Ok(status) => {
+            let ver = format!("{}", status.build.version);
+            let ok = status.build.version.minor >= 51;
+            SoftwareVersion {
+                name,
+                version: Some(ver),
+                status: if ok { "ok" } else { "too_old" }.to_string(),
+                detail: if ok {
+                    "firmware >= 1.51".to_string()
+                } else {
+                    "Need firmware >= 1.51 for SNP".to_string()
+                },
+            }
+        }
+        Err(_) => SoftwareVersion {
+            name,
+            version: None,
+            status: "missing".to_string(),
+            detail: "Cannot query SEV platform status (need sudo?)".to_string(),
+        },
+    }
+}
+
+/// Parse a version string and check if it's >= major.minor
+fn parse_version_ge(ver: &str, major: u32, minor: u32) -> bool {
+    let parts: Vec<&str> = ver.split('.').collect();
+    if parts.len() < 2 {
+        return false;
+    }
+    let v_major = parts[0].parse::<u32>().unwrap_or(0);
+    let v_minor = parts[1].parse::<u32>().unwrap_or(0);
+    (v_major, v_minor) >= (major, minor)
+}
+
+/// Collect all software version checks
+fn collect_software_versions() -> Vec<SoftwareVersion> {
+    vec![
+        check_kernel_version(),
+        check_qemu_version(),
+        check_libvirt_version(),
+        check_ovmf_version(),
+        check_sev_firmware_version(),
+    ]
+}
+
+/// Print software versions for default mode
+fn print_software_versions(versions: &[SoftwareVersion]) {
+    println!("\n--- Software Versions ---");
+    for v in versions {
+        let ver_str = v.version.as_deref().unwrap_or("not found");
+        let status_icon = match v.status.as_str() {
+            "ok" => format!("{}", "ok".green()),
+            "too_old" => format!("{}", "too old".red()),
+            "missing" => format!("{}", "missing".red()),
+            "optional_missing" => format!("{}", "not found".yellow()),
+            _ => v.status.clone(),
+        };
+        println!("  {}: {} ({})", v.name, ver_str, status_icon);
     }
 }
