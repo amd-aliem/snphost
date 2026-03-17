@@ -958,11 +958,81 @@ pub fn cmd(args: OkArgs, quiet: bool) -> Result<()> {
     }
 }
 
-// Stub renderers for short, verbose, and JSON modes (implemented in subsequent commits).
+/// Count pass/fail/skip across the entire result tree.
+fn count_results(results: &[TestResultNode]) -> (usize, usize, usize) {
+    let (mut pass, mut fail, mut skip) = (0, 0, 0);
+    for r in results {
+        match r.stat {
+            TestState::Pass => pass += 1,
+            TestState::Fail => fail += 1,
+            TestState::Skip => skip += 1,
+        }
+        let (p, f, s) = count_results(&r.children);
+        pass += p;
+        fail += f;
+        skip += s;
+    }
+    (pass, fail, skip)
+}
+
+/// Collect all failure nodes from the result tree.
+fn collect_failures(results: &[TestResultNode]) -> Vec<&TestResultNode> {
+    let mut failures = Vec::new();
+    for r in results {
+        if r.stat == TestState::Fail {
+            failures.push(r);
+        }
+        failures.extend(collect_failures(&r.children));
+    }
+    failures
+}
+
+/// Short mode: failures-only compact output with summary counts.
 fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
-    render_default(results);
-    println!();
-    render_software_versions(sw_versions);
+    let (pass, fail, skip) = count_results(results);
+    let total = pass + fail + skip;
+    println!("snphost ok: {}/{} passed, {} failed, {} skipped", pass, total, fail, skip);
+
+    let failures = collect_failures(results);
+    if !failures.is_empty() {
+        println!("\nFAILURES:");
+        for f in &failures {
+            let msg = match &f.mesg {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            };
+            let label = match &f.label {
+                Some(l) => format!(" ({})", l),
+                None => String::new(),
+            };
+            println!("  [{}] {}{}{}", "FAIL".red(), f.name, label, msg);
+            if let Some(hint) = &f.fix_hint {
+                println!("    Hint: {}", hint);
+            }
+        }
+    }
+
+    // Show software version issues
+    let sw_issues: Vec<&SoftwareVersion> = sw_versions
+        .iter()
+        .filter(|v| v.status == SwVersionStatus::TooOld || v.status == SwVersionStatus::PermissionDenied)
+        .collect();
+    if !sw_issues.is_empty() {
+        println!("\nSOFTWARE ISSUES:");
+        for v in &sw_issues {
+            let ver = v.installed_version.as_deref().unwrap_or("N/A");
+            let min = v.min_version.as_deref().unwrap_or("N/A");
+            match v.status {
+                SwVersionStatus::TooOld => {
+                    println!("  [{}] {}: {} (min: {})", "FAIL".red(), v.component, ver, min);
+                }
+                SwVersionStatus::PermissionDenied => {
+                    println!("  [{}] {}: Permission denied (min: {})", "FAIL".red(), v.component, min);
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 fn render_verbose(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
