@@ -106,11 +106,12 @@ fn main() -> Result<()> {
         SnpHostCmd::VlekLoad(load) => vlek_load::cmd(load),
     };
 
-    if !snphost.quiet {
-        if let Err(ref e) = result {
+    if let Err(ref e) = result {
+        if !snphost.quiet {
             eprintln!("ERROR: {}", e);
         }
+        std::process::exit(1);
     }
 
-    result
+    Ok(())
 }
