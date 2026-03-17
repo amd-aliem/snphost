@@ -994,6 +994,16 @@ fn render_default(results: &[TestResultNode]) {
             msg,
             width = r.level
         );
+        if r.stat == TestState::Fail {
+            if let Some(hint) = &r.fix_hint {
+                println!(
+                    "         {:width$}  ^ {}",
+                    "",
+                    hint,
+                    width = r.level
+                );
+            }
+        }
         render_default(&r.children);
     }
 }
