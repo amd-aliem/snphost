@@ -725,18 +725,23 @@ fn has_failures(results: &[TestResultNode]) -> bool {
     false
 }
 
-/// Render results in the default format (identical to the original output).
+/// Render results in the default format, with parenthetical labels added.
 fn render_default(results: &[TestResultNode]) {
     for r in results {
         let msg = match &r.mesg {
             Some(m) => format!(": {}", m),
             None => String::new(),
         };
+        let label = match &r.label {
+            Some(l) => format!(" ({})", l),
+            None => String::new(),
+        };
         println!(
-            "[ {:^4} ] {:width$}- {}{}",
+            "[ {:^4} ] {:width$}- {}{}{}",
             format!("{}", r.stat),
             "",
             r.name,
+            label,
             msg,
             width = r.level
         );
