@@ -920,27 +920,52 @@ fn render_short(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], _p
 }
 
 fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) {
-    for e in entries {
-        let status_colored = match e.status.as_str() {
-            "PASS" => format!("{}", "PASS".green()),
-            "FAIL" => format!("{}", "FAIL".red()),
-            _ => format!("{}", "SKIP".yellow()),
-        };
-        let msg = match &e.message {
-            Some(m) => format!(": {}", m),
-            None => String::new(),
-        };
-        println!(
-            "[ {:^4} ] {:width$}- {}{}",
-            status_colored,
-            "",
-            e.name,
-            msg,
-            width = e.level
-        );
+    // Group entries by category, preserving order of first appearance
+    let categories = [
+        TestCategory::CpuSupport,
+        TestCategory::CpuInfo,
+        TestCategory::BiosConfigured,
+        TestCategory::PlatformInitialized,
+        TestCategory::KvmConfig,
+        TestCategory::Compliance,
+    ];
+
+    for cat in &categories {
+        let cat_entries: Vec<&TestResultEntry> = entries
+            .iter()
+            .filter(|e| test_metadata(&e.name).category == *cat)
+            .collect();
+        if cat_entries.is_empty() {
+            continue;
+        }
+        println!("\n=== {} ===", cat);
+        for e in &cat_entries {
+            let meta = test_metadata(&e.name);
+            let status_colored = match e.status.as_str() {
+                "PASS" => format!("{}", "PASS".green()),
+                "FAIL" => format!("{}", "FAIL".red()),
+                _ => format!("{}", "SKIP".yellow()),
+            };
+            let msg = match &e.message {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            };
+            println!("  [ {:^4} ] {}{}", status_colored, e.name, msg);
+            if !meta.description.is_empty() {
+                println!("           {}", meta.description);
+            }
+            if e.status == "FAIL" && !meta.fix_hint.is_empty() {
+                println!(
+                    "           {} {}",
+                    "Recommended:".yellow(),
+                    meta.fix_hint
+                );
+            }
+        }
     }
+
     // Software versions
-    println!("\n--- Software Versions ---");
+    println!("\n=== Software Versions ===");
     for v in sw_versions {
         let ver_str = v.version.as_deref().unwrap_or("not found");
         let status_icon = match v.status.as_str() {
@@ -951,6 +976,38 @@ fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) 
             _ => v.status.clone(),
         };
         println!("  {}: {} ({})", v.name, ver_str, status_icon);
+    }
+
+    // Detected Issues summary
+    let issues: Vec<&TestResultEntry> = entries
+        .iter()
+        .filter(|e| e.status == "FAIL")
+        .collect();
+    let sw_issues: Vec<&SoftwareVersion> = sw_versions
+        .iter()
+        .filter(|v| v.status == "too_old" || v.status == "missing")
+        .collect();
+
+    if !issues.is_empty() || !sw_issues.is_empty() {
+        println!("\n{}", "=== DETECTED ISSUES ===".red());
+        for (i, e) in issues.iter().enumerate() {
+            let meta = test_metadata(&e.name);
+            let action = if meta.fix_hint.is_empty() {
+                String::new()
+            } else {
+                format!(" -> {}", meta.fix_hint)
+            };
+            println!("  {}. {} [FAIL]{}", i + 1, e.name, action);
+        }
+        for v in &sw_issues {
+            let ver_str = v.version.as_deref().unwrap_or("not found");
+            println!(
+                "  - {} {} ({})",
+                v.name, ver_str, v.detail
+            );
+        }
+    } else {
+        println!("\n{}", "No issues detected.".green());
     }
 }
 
