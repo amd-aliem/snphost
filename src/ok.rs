@@ -1012,20 +1012,43 @@ fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) 
 }
 
 fn render_json(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], passed: bool) {
+    let fail_count = entries.iter().filter(|e| e.status == "FAIL").count();
+    let pass_count = entries.iter().filter(|e| e.status == "PASS").count();
+    let skip_count = entries.iter().filter(|e| e.status == "SKIP").count();
+
     let results: Vec<serde_json::Value> = entries
         .iter()
         .map(|e| {
-            serde_json::json!({
+            let meta = test_metadata(&e.name);
+            let mut obj = serde_json::json!({
                 "name": e.name,
                 "status": e.status,
-                "message": e.message,
-            })
+                "category": format!("{}", meta.category),
+                "level": e.level,
+            });
+            if let Some(m) = &e.message {
+                obj["message"] = serde_json::json!(m);
+            }
+            if !meta.description.is_empty() {
+                obj["description"] = serde_json::json!(meta.description);
+            }
+            if e.status == "FAIL" && !meta.fix_hint.is_empty() {
+                obj["fix_hint"] = serde_json::json!(meta.fix_hint);
+            }
+            obj
         })
         .collect();
+
     let output = serde_json::json!({
         "results": results,
         "software_versions": sw_versions,
-        "overall_pass": passed,
+        "summary": {
+            "total": entries.len(),
+            "passed": pass_count,
+            "failed": fail_count,
+            "skipped": skip_count,
+            "overall_pass": passed,
+        },
     });
     println!(
         "{}",
