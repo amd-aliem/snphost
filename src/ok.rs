@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     mem::{transmute, MaybeUninit},
     os::unix::io::AsRawFd,
+    process::Command,
     str::from_utf8,
 };
 
@@ -639,14 +640,262 @@ fn collect_tests() -> Vec<Test> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// Software version checks
+// ---------------------------------------------------------------------------
+
+struct SoftwareVersion {
+    component: String,
+    path: Option<String>,
+    installed_version: Option<String>,
+    min_version: Option<String>,
+    status: SwVersionStatus,
+}
+
+#[derive(PartialEq, Eq)]
+enum SwVersionStatus {
+    Supported,
+    NotInstalled,
+    TooOld,
+    PermissionDenied,
+    Unknown,
+}
+
+/// Compare two dotted version strings (e.g. "6.14" >= "6.11").
+/// Returns true if `have` >= `need`.
+fn version_ge(have: &str, need: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.')
+            .filter_map(|p| {
+                // Strip non-numeric suffixes (e.g. "37-generic" -> "37")
+                let numeric: String = p.chars().take_while(|c| c.is_ascii_digit()).collect();
+                numeric.parse().ok()
+            })
+            .collect()
+    };
+    let h = parse(have);
+    let n = parse(need);
+    for i in 0..h.len().max(n.len()) {
+        let hv = h.get(i).copied().unwrap_or(0);
+        let nv = n.get(i).copied().unwrap_or(0);
+        if hv != nv {
+            return hv > nv;
+        }
+    }
+    true // equal
+}
+
+fn check_qemu_version() -> SoftwareVersion {
+    let binary = "/usr/bin/qemu-system-x86_64";
+    let path = if std::path::Path::new(binary).exists() {
+        Some(binary.to_string())
+    } else {
+        None
+    };
+
+    let version = path.as_ref().and_then(|p| {
+        Command::new(p)
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // Parse: "QEMU emulator version X.Y.Z ..."
+                stdout
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split("version ").nth(1))
+                    .map(|v| v.split_whitespace().next().unwrap_or(v).to_string())
+            })
+    });
+
+    let min = "6.0";
+    let status = match (&path, &version) {
+        (None, _) => SwVersionStatus::NotInstalled,
+        (_, None) => SwVersionStatus::Unknown,
+        (_, Some(v)) => {
+            if version_ge(v, min) {
+                SwVersionStatus::Supported
+            } else {
+                SwVersionStatus::TooOld
+            }
+        }
+    };
+
+    SoftwareVersion {
+        component: "QEMU".to_string(),
+        path,
+        installed_version: version,
+        min_version: Some(min.to_string()),
+        status,
+    }
+}
+
+fn check_libvirt_version() -> SoftwareVersion {
+    let version = Command::new("virsh")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let min = "4.5";
+    let status = match &version {
+        None => SwVersionStatus::NotInstalled,
+        Some(v) => {
+            if version_ge(v, min) {
+                SwVersionStatus::Supported
+            } else {
+                SwVersionStatus::TooOld
+            }
+        }
+    };
+
+    SoftwareVersion {
+        component: "libvirt".to_string(),
+        path: None,
+        installed_version: version,
+        min_version: Some(min.to_string()),
+        status,
+    }
+}
+
+fn check_ovmf_version() -> SoftwareVersion {
+    let paths = [
+        "/usr/share/ovmf/OVMF.amdsev.fd",
+        "/usr/share/OVMF/OVMF_CODE.fd",
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+    ];
+    let found_path = paths.iter().find(|p| std::path::Path::new(p).exists());
+
+    let version = Command::new("dpkg-query")
+        .args(["--showformat=${Version}", "--show", "ovmf"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            Command::new("rpm")
+                .args(["-q", "--qf", "%{VERSION}", "edk2-ovmf"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+        });
+
+    let status = match (&found_path, &version) {
+        (None, _) => SwVersionStatus::NotInstalled,
+        (Some(_), None) => SwVersionStatus::Unknown,
+        (Some(_), Some(_)) => SwVersionStatus::Supported,
+    };
+
+    SoftwareVersion {
+        component: "OVMF".to_string(),
+        path: found_path.map(|p| p.to_string()),
+        installed_version: version,
+        min_version: None,
+        status,
+    }
+}
+
+fn check_kernel_version() -> SoftwareVersion {
+    let version = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .ok();
+
+    let min = "6.11";
+    let status = match &version {
+        None => SwVersionStatus::Unknown,
+        Some(v) => {
+            if version_ge(v, min) {
+                SwVersionStatus::Supported
+            } else {
+                SwVersionStatus::TooOld
+            }
+        }
+    };
+
+    SoftwareVersion {
+        component: "Kernel".to_string(),
+        path: None,
+        installed_version: version,
+        min_version: Some(min.to_string()),
+        status,
+    }
+}
+
+fn check_sev_firmware_version() -> SoftwareVersion {
+    let min = "1.51";
+    match sev_platform_status() {
+        Ok(status) => {
+            let ver = format!("{}", status.build.version);
+            let ok = status.build.version.minor >= 51;
+            SoftwareVersion {
+                component: "SEV Firmware".to_string(),
+                path: Some("/dev/sev".to_string()),
+                installed_version: Some(ver),
+                min_version: Some(min.to_string()),
+                status: if ok {
+                    SwVersionStatus::Supported
+                } else {
+                    SwVersionStatus::TooOld
+                },
+            }
+        }
+        Err(e) => {
+            let err_str = format!("{e}");
+            let status = if err_str.contains("Permission denied") || err_str.contains("unable to open") {
+                SwVersionStatus::PermissionDenied
+            } else {
+                SwVersionStatus::Unknown
+            };
+            SoftwareVersion {
+                component: "SEV Firmware".to_string(),
+                path: Some("/dev/sev".to_string()),
+                installed_version: None,
+                min_version: Some(min.to_string()),
+                status,
+            }
+        }
+    }
+}
+
+fn check_software_versions() -> Vec<SoftwareVersion> {
+    vec![
+        check_qemu_version(),
+        check_libvirt_version(),
+        check_ovmf_version(),
+        check_kernel_version(),
+        check_sev_firmware_version(),
+    ]
+}
+
 const INDENT: usize = 2;
 
 pub fn cmd(quiet: bool) -> Result<()> {
     let tests = collect_tests();
     let results = collect_results(&tests, 0, SEV_MASK | ES_MASK | SNP_MASK);
+    let sw_versions = check_software_versions();
 
     if !quiet {
         render_default(&results);
+        println!();
+        render_software_versions(&sw_versions);
     }
 
     if has_failures(&results) {
@@ -746,6 +995,47 @@ fn render_default(results: &[TestResultNode]) {
             width = r.level
         );
         render_default(&r.children);
+    }
+}
+
+/// Render software version checks in the default format.
+fn render_software_versions(versions: &[SoftwareVersion]) {
+    println!("Installed Components:");
+    for v in versions {
+        let stat_display = match v.status {
+            SwVersionStatus::Supported => TestState::Pass,
+            SwVersionStatus::TooOld => TestState::Fail,
+            SwVersionStatus::PermissionDenied => TestState::Fail,
+            SwVersionStatus::NotInstalled => TestState::Skip,
+            SwVersionStatus::Unknown => TestState::Skip,
+        };
+
+        let path_str = match &v.path {
+            Some(p) => format!(" [{}]", p),
+            None => String::new(),
+        };
+
+        let min_str = match &v.min_version {
+            Some(m) => format!(" (min: {})", m),
+            None => String::new(),
+        };
+
+        let detail = match v.status {
+            SwVersionStatus::NotInstalled => "Not installed".to_string(),
+            SwVersionStatus::PermissionDenied => format!("Permission denied{}", min_str),
+            _ => {
+                let ver = v.installed_version.as_deref().unwrap_or("N/A");
+                format!("{}{}", ver, min_str)
+            }
+        };
+
+        println!(
+            "[ {:^4} ] - {}{}: {}",
+            format!("{}", stat_display),
+            v.component,
+            path_str,
+            detail,
+        );
     }
 }
 
