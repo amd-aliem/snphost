@@ -35,7 +35,7 @@ struct TestResult {
     mesg: Option<String>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum TestState {
     Pass,
     Skip,
@@ -94,6 +94,15 @@ impl fmt::Display for SevStatusTests {
         };
         write!(f, "{}", s)
     }
+}
+
+/// A collected test result node, forming a tree that mirrors the test hierarchy.
+struct TestResultNode {
+    name: String,
+    stat: TestState,
+    mesg: Option<String>,
+    level: usize,
+    children: Vec<TestResultNode>,
 }
 
 fn collect_tests() -> Vec<Test> {
@@ -479,102 +488,102 @@ const INDENT: usize = 2;
 
 pub fn cmd(quiet: bool) -> Result<()> {
     let tests = collect_tests();
+    let results = collect_results(&tests, 0, SEV_MASK | ES_MASK | SNP_MASK);
 
-    if run_test(&tests, 0, quiet, SEV_MASK | ES_MASK | SNP_MASK) {
-        Ok(())
-    } else {
+    if !quiet {
+        render_default(&results);
+    }
+
+    if has_failures(&results) {
         Err(anyhow::anyhow!(
             "One or more tests in snphost ok reported a failure"
         ))
+    } else {
+        Ok(())
     }
 }
 
-fn run_test(tests: &[Test], level: usize, quiet: bool, mask: usize) -> bool {
-    let mut passed = true;
+/// Run all tests and collect results into a tree, without printing.
+fn collect_results(tests: &[Test], level: usize, mask: usize) -> Vec<TestResultNode> {
+    let mut results = Vec::new();
 
     for t in tests {
         // Skip tests that aren't included in the specified generation.
         if (t.gen_mask & mask) != t.gen_mask {
-            test_gen_not_included(t, level, quiet);
+            results.push(make_skip_node(t, level));
             continue;
         }
 
         let res = (t.run)();
-        emit_result(&res, level, quiet);
-        match res.stat {
-            TestState::Pass => {
-                if !run_test(&t.sub, level + INDENT, quiet, mask) {
-                    passed = false;
-                }
-            }
-            TestState::Fail => {
-                passed = false;
-                emit_skip(&t.sub, level + INDENT, quiet);
-            }
-            // Skipped tests are marked as skip before recursing. They are just emitted and not actually processed.
+        let children = match res.stat {
+            TestState::Pass => collect_results(&t.sub, level + INDENT, mask),
+            TestState::Fail => make_skip_tree(&t.sub, level + INDENT),
             TestState::Skip => unreachable!(),
-        }
+        };
+
+        results.push(TestResultNode {
+            name: res.name,
+            stat: res.stat,
+            mesg: res.mesg,
+            level,
+            children,
+        });
     }
 
-    passed
+    results
 }
 
-fn emit_result(res: &TestResult, level: usize, quiet: bool) {
-    if !quiet {
-        let msg = match &res.mesg {
+/// Create a skip node for a test not matching the generation mask.
+fn make_skip_node(test: &Test, level: usize) -> TestResultNode {
+    TestResultNode {
+        name: test.name.to_string(),
+        stat: TestState::Skip,
+        mesg: None,
+        level,
+        children: make_skip_tree(&test.sub, level + INDENT),
+    }
+}
+
+/// Recursively create skip nodes for all tests in a subtree.
+fn make_skip_tree(tests: &[Test], level: usize) -> Vec<TestResultNode> {
+    tests.iter().map(|t| make_skip_node(t, level)).collect()
+}
+
+/// Check if any node in the result tree is a failure.
+fn has_failures(results: &[TestResultNode]) -> bool {
+    for r in results {
+        if r.stat == TestState::Fail {
+            return true;
+        }
+        if has_failures(&r.children) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Render results in the default format (identical to the original output).
+fn render_default(results: &[TestResultNode]) {
+    for r in results {
+        let msg = match &r.mesg {
             Some(m) => format!(": {}", m),
-            None => "".to_string(),
+            None => String::new(),
         };
         println!(
             "[ {:^4} ] {:width$}- {}{}",
-            format!("{}", res.stat),
+            format!("{}", r.stat),
             "",
-            res.name,
+            r.name,
             msg,
-            width = level
-        )
-    }
-}
-
-fn test_gen_not_included(test: &Test, level: usize, quiet: bool) {
-    if !quiet {
-        let tr_skip = TestResult {
-            name: test.name.to_string(),
-            stat: TestState::Skip,
-            mesg: None,
-        };
-
-        println!(
-            "[ {:^4} ] {:width$}- {}",
-            format!("{}", tr_skip.stat),
-            "",
-            tr_skip.name,
-            width = level
+            width = r.level
         );
-        emit_skip(&test.sub, level + INDENT, quiet);
+        render_default(&r.children);
     }
 }
 
-fn emit_skip(tests: &[Test], level: usize, quiet: bool) {
-    if !quiet {
-        for t in tests {
-            let tr_skip = TestResult {
-                name: t.name.to_string(),
-                stat: TestState::Skip,
-                mesg: None,
-            };
-
-            println!(
-                "[ {:^4} ] {:width$}- {}",
-                format!("{}", tr_skip.stat),
-                "",
-                tr_skip.name,
-                width = level
-            );
-            emit_skip(&t.sub, level + INDENT, quiet);
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Test implementation functions (unchanged)
+// ---------------------------------------------------------------------------
 
 fn dev_sev_r() -> TestResult {
     let (stat, mesg) = match dev_sev_rw(fs::OpenOptions::new().read(true)) {
@@ -815,14 +824,14 @@ fn snp_ioctl(test: SnpStatusTest) -> TestResult {
                 TestResult{
                             name: format!("{}", SnpStatusTest::Tcb),
                             stat: TestState::Pass,
-                            mesg: format!("TCB versions match \n\n Platform TCB version: {} \n Reported TCB version: {}", 
+                            mesg: format!("TCB versions match \n\n Platform TCB version: {} \n Reported TCB version: {}",
                                         status.platform_tcb_version, status.reported_tcb_version).into()
                         }
             } else {
                 TestResult {
                     name: format!("{}", SnpStatusTest::Tcb),
                     stat: TestState::Fail,
-                    mesg: format!("The TCB versions did NOT match \n\n Platform TCB version: {} \n Reported TCB version: {}", 
+                    mesg: format!("The TCB versions did NOT match \n\n Platform TCB version: {} \n Reported TCB version: {}",
                                     status.platform_tcb_version, status.reported_tcb_version).into(),
                 }
             }
@@ -926,7 +935,7 @@ fn sev_ioctl(test: SevStatusTests) -> TestResult {
                     name: format!("{}", SevStatusTests::Firmware),
                     stat: TestState::Fail,
                     mesg: format!(
-                        "SEV firmware version needs to be at least 1.51, 
+                        "SEV firmware version needs to be at least 1.51,
                             current firmware version: {}",
                         status.build.version
                     )
