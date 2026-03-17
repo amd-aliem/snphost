@@ -1128,10 +1128,109 @@ fn render_verbose(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
     }
 }
 
+/// JSON-serializable representation of a test result.
+#[derive(serde::Serialize)]
+struct JsonTestResult {
+    name: String,
+    #[serde(rename = "stat")]
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix_hint: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<JsonTestResult>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonSoftwareVersion {
+    component: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installed_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_version: Option<String>,
+    status: String,
+}
+
+#[derive(serde::Serialize)]
+struct JsonSummary {
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    total: usize,
+}
+
+#[derive(serde::Serialize)]
+struct JsonOutput {
+    tests: Vec<JsonTestResult>,
+    software: Vec<JsonSoftwareVersion>,
+    summary: JsonSummary,
+}
+
+fn to_json_test(node: &TestResultNode) -> JsonTestResult {
+    JsonTestResult {
+        name: node.name.clone(),
+        status: match node.stat {
+            TestState::Pass => "pass".to_string(),
+            TestState::Fail => "fail".to_string(),
+            TestState::Skip => "skip".to_string(),
+        },
+        message: node.mesg.clone(),
+        category: match node.category {
+            TestCategory::CpuSupport => "cpu_support",
+            TestCategory::CpuInfo => "cpu_info",
+            TestCategory::BiosConfigured => "bios_configured",
+            TestCategory::PlatformInitialized => "platform_initialized",
+            TestCategory::KvmConfig => "kvm_config",
+            TestCategory::Compliance => "compliance",
+        }
+        .to_string(),
+        label: node.label.clone(),
+        description: node.description.clone(),
+        fix_hint: node.fix_hint.clone(),
+        children: node.children.iter().map(to_json_test).collect(),
+    }
+}
+
+fn to_json_sw(v: &SoftwareVersion) -> JsonSoftwareVersion {
+    JsonSoftwareVersion {
+        component: v.component.clone(),
+        path: v.path.clone(),
+        installed_version: v.installed_version.clone(),
+        min_version: v.min_version.clone(),
+        status: match v.status {
+            SwVersionStatus::Supported => "supported",
+            SwVersionStatus::NotInstalled => "not_installed",
+            SwVersionStatus::TooOld => "too_old",
+            SwVersionStatus::PermissionDenied => "permission_denied",
+            SwVersionStatus::Unknown => "unknown",
+        }
+        .to_string(),
+    }
+}
+
+/// JSON mode: machine-readable output with all metadata.
 fn render_json(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
-    render_default(results);
-    println!();
-    render_software_versions(sw_versions);
+    let (pass, fail, skip) = count_results(results);
+    let output = JsonOutput {
+        tests: results.iter().map(to_json_test).collect(),
+        software: sw_versions.iter().map(to_json_sw).collect(),
+        summary: JsonSummary {
+            passed: pass,
+            failed: fail,
+            skipped: skip,
+            total: pass + fail + skip,
+        },
+    };
+    // JSON output goes to stdout; errors in has_failures() still go to stderr.
+    println!("{}", serde_json::to_string_pretty(&output).unwrap_or_else(|e| format!("{{\"error\": \"{}\"}}", e)));
 }
 
 /// Run all tests and collect results into a tree, without printing.
