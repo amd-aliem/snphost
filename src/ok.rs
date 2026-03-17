@@ -11,6 +11,7 @@ use std::{
     str::from_utf8,
 };
 
+use clap::Args;
 use colorful::*;
 
 use msru::{Accessor, Msr};
@@ -21,6 +22,278 @@ type TestFn = dyn Fn() -> TestResult;
 const SEV_MASK: usize = 1;
 const ES_MASK: usize = 1 << 1;
 const SNP_MASK: usize = 1 << 2;
+
+/// Output mode for the ok command
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputMode {
+    Default,
+    Short,
+    Verbose,
+    Json,
+}
+
+/// Arguments for the `ok` subcommand
+#[derive(Args, Clone)]
+pub struct OkArgs {
+    /// Show only failures with summary counts
+    #[arg(short, long)]
+    short: bool,
+
+    /// Show detailed test descriptions grouped by category
+    #[arg(short, long)]
+    verbose: bool,
+
+    /// Output results as JSON
+    #[arg(short, long)]
+    json: bool,
+}
+
+impl OkArgs {
+    fn output_mode(&self) -> OutputMode {
+        if self.json {
+            OutputMode::Json
+        } else if self.verbose {
+            OutputMode::Verbose
+        } else if self.short {
+            OutputMode::Short
+        } else {
+            OutputMode::Default
+        }
+    }
+}
+
+/// Accumulated result entry for post-processing by non-default renderers
+struct TestResultEntry {
+    name: String,
+    status: String, // "PASS", "FAIL", "SKIP"
+    message: Option<String>,
+    level: usize,
+}
+
+/// Category for grouping tests in verbose/JSON output
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+enum TestCategory {
+    CpuSupport,
+    CpuInfo,
+    BiosConfigured,
+    PlatformInitialized,
+    KvmConfig,
+    Compliance,
+}
+
+impl fmt::Display for TestCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TestCategory::CpuSupport => write!(f, "CPU Support"),
+            TestCategory::CpuInfo => write!(f, "CPU Info"),
+            TestCategory::BiosConfigured => write!(f, "BIOS Configured"),
+            TestCategory::PlatformInitialized => write!(f, "Platform Initialized"),
+            TestCategory::KvmConfig => write!(f, "KVM Config"),
+            TestCategory::Compliance => write!(f, "Compliance"),
+        }
+    }
+}
+
+/// Metadata for a test, looked up by name
+struct TestMetadata {
+    category: TestCategory,
+    label: &'static str,
+    description: &'static str,
+    fix_hint: &'static str,
+}
+
+/// Look up metadata for a test by its name.
+/// Uses starts_with matching for tests whose names vary at runtime.
+fn test_metadata(name: &str) -> TestMetadata {
+    match name {
+        "AMD CPU" => TestMetadata {
+            category: TestCategory::CpuSupport,
+            label: "(CPU)",
+            description: "Checks CPU vendor string via CPUID is \"AuthenticAMD\"",
+            fix_hint: "Requires AMD processor",
+        },
+        "Microcode support" => TestMetadata {
+            category: TestCategory::CpuSupport,
+            label: "(CPU)",
+            description: "Verifies processor brand string contains \"EPYC\" (server-class CPU required)",
+            fix_hint: "Need EPYC server-class CPU",
+        },
+        "Secure Memory Encryption (SME)" => TestMetadata {
+            category: TestCategory::CpuSupport,
+            label: "(CPU)",
+            description: "Checks CPUID 0x8000001F EAX bit 0 for SME hardware support",
+            fix_hint: "Need EPYC Naples+",
+        },
+        "SME" => TestMetadata {
+            category: TestCategory::BiosConfigured,
+            label: "(BIOS)",
+            description: "Reads MSR 0xC0010010 (SYSCFG) bit 23 to verify SME enabled at system level",
+            fix_hint: "BIOS: CBS > CPU Common > SMEE. Run: sudo modprobe msr",
+        },
+        "Secure Encrypted Virtualization (SEV)" => TestMetadata {
+            category: TestCategory::CpuSupport,
+            label: "(CPU)",
+            description: "Checks CPUID 0x8000001F EAX bit 1 for SEV hardware support",
+            fix_hint: "Need EPYC with SEV",
+        },
+        "SEV firmware version" => TestMetadata {
+            category: TestCategory::BiosConfigured,
+            label: "",
+            description: "Queries /dev/sev PLATFORM_STATUS for firmware version (requires >= 1.51 for SNP)",
+            fix_hint: "Run with sudo. Update BIOS for firmware >= 1.51",
+        },
+        "Encrypted State (SEV-ES)" => TestMetadata {
+            category: TestCategory::CpuSupport,
+            label: "(CPU)",
+            description: "Checks CPUID 0x8000001F EAX bit 3 for SEV-ES hardware support",
+            fix_hint: "Need EPYC Rome+",
+        },
+        "SEV-ES initialized" => TestMetadata {
+            category: TestCategory::PlatformInitialized,
+            label: "(FW Ready)",
+            description: "Queries SEV platform status flags bit 8 for SEV-ES initialization",
+            fix_hint: "Run with sudo. modprobe kvm_amd sev-es=1",
+        },
+        "SEV initialized" => TestMetadata {
+            category: TestCategory::PlatformInitialized,
+            label: "(FW Ready)",
+            description: "Queries SEV platform status state field (must be Initialized or Working)",
+            fix_hint: "Run with sudo. modprobe kvm_amd sev=1",
+        },
+        "Secure Nested Paging (SEV-SNP)" => TestMetadata {
+            category: TestCategory::CpuSupport,
+            label: "(CPU)",
+            description: "Checks CPUID 0x8000001F EAX bit 4 for SEV-SNP hardware support",
+            fix_hint: "Need EPYC Milan+",
+        },
+        "VM Permission Levels" => TestMetadata {
+            category: TestCategory::CpuSupport,
+            label: "(CPU)",
+            description: "Checks CPUID 0x8000001F EAX bit 5 for VMPL hardware support",
+            fix_hint: "Check BIOS update",
+        },
+        "Number of VMPLs" => TestMetadata {
+            category: TestCategory::CpuInfo,
+            label: "",
+            description: "Reads CPUID 0x8000001F EBX bits 15:12 for VMPL count (expected: 4)",
+            fix_hint: "(informational)",
+        },
+        "SNP" | "SEV-SNP" => TestMetadata {
+            category: TestCategory::BiosConfigured,
+            label: "(BIOS)",
+            description: "Reads MSR 0xC0010010 (SYSCFG) bit 24 to verify SNP enabled at system level",
+            fix_hint: "BIOS: CBS > CPU Common > SNP Memory Coverage. Run: sudo modprobe msr",
+        },
+        "SNP initialized" => TestMetadata {
+            category: TestCategory::PlatformInitialized,
+            label: "(FW Ready)",
+            description: "Queries SNP_PLATFORM_STATUS state field = 1 (INIT state)",
+            fix_hint: "Run with sudo. Need kernel 6.11+. modprobe kvm_amd sev_snp=1",
+        },
+        "RMP table initialized" => TestMetadata {
+            category: TestCategory::PlatformInitialized,
+            label: "(FW Ready)",
+            description: "Queries SNP platform status IS_RMP_INIT bit",
+            fix_hint: "Run with sudo. Need CONFIG_KVM_AMD_SEV=y. Reboot if firmware updated",
+        },
+        "Alias check" => TestMetadata {
+            category: TestCategory::Compliance,
+            label: "",
+            description: "Queries SNP platform status ALIAS_CHECK_COMPLETE bit (CVE-2024-21944 mitigation)",
+            fix_hint: "Update firmware/BIOS per AMD-SB-3015. Reboot required",
+        },
+        "Physical address bit reduction" => TestMetadata {
+            category: TestCategory::CpuInfo,
+            label: "",
+            description: "Reads CPUID 0x8000001F EBX bits 11:6 for PA bit reduction value",
+            fix_hint: "(informational)",
+        },
+        "C-bit location" => TestMetadata {
+            category: TestCategory::CpuInfo,
+            label: "",
+            description: "Reads CPUID 0x8000001F EBX bits 5:0 for encryption bit position in page tables",
+            fix_hint: "(informational)",
+        },
+        "Number of encrypted guests supported simultaneously" => TestMetadata {
+            category: TestCategory::CpuInfo,
+            label: "",
+            description: "Reads CPUID 0x8000001F ECX for maximum encrypted guest count",
+            fix_hint: "(informational)",
+        },
+        "Minimum ASID value for SEV-enabled, SEV-ES disabled guest" => TestMetadata {
+            category: TestCategory::CpuInfo,
+            label: "",
+            description: "Reads CPUID 0x8000001F EDX for minimum SEV-only ASID value",
+            fix_hint: "(informational)",
+        },
+        "/dev/sev readable" => TestMetadata {
+            category: TestCategory::PlatformInitialized,
+            label: "",
+            description: "Attempts to open /dev/sev device for reading",
+            fix_hint: "Run with sudo. modprobe ccp. Must be baremetal",
+        },
+        "/dev/sev writable" => TestMetadata {
+            category: TestCategory::PlatformInitialized,
+            label: "",
+            description: "Attempts to open /dev/sev device for writing",
+            fix_hint: "Run with sudo. Must be baremetal",
+        },
+        "Memlock resource limit" => TestMetadata {
+            category: TestCategory::Compliance,
+            label: "",
+            description: "Reads RLIMIT_MEMLOCK soft and hard limits via getrlimit syscall",
+            fix_hint: "Set memlock unlimited in /etc/security/limits.conf",
+        },
+        _ if name.starts_with("Page flush MSR") => TestMetadata {
+            category: TestCategory::CpuInfo,
+            label: "",
+            description: "Checks CPUID 0x8000001F EAX bit 2 for page flush MSR optimization support",
+            fix_hint: "(informational)",
+        },
+        _ if name.starts_with("KVM supported") || name == "KVM Support" => TestMetadata {
+            category: TestCategory::KvmConfig,
+            label: "(KVM)",
+            description: "Opens /dev/kvm and queries KVM API version via ioctl",
+            fix_hint: "Run with sudo. modprobe kvm kvm_amd. Enable SVM in BIOS",
+        },
+        "SEV enabled in KVM" => TestMetadata {
+            category: TestCategory::KvmConfig,
+            label: "(KVM)",
+            description: "Reads /sys/module/kvm_amd/parameters/sev for \"1\" or \"Y\"",
+            fix_hint: "options kvm_amd sev=1 in /etc/modprobe.d/kvm.conf",
+        },
+        "SEV-ES enabled in KVM" => TestMetadata {
+            category: TestCategory::KvmConfig,
+            label: "(KVM)",
+            description: "Reads /sys/module/kvm_amd/parameters/sev_es for \"1\" or \"Y\"",
+            fix_hint: "options kvm_amd sev-es=1 in /etc/modprobe.d/kvm.conf",
+        },
+        "SEV-SNP enabled in KVM" => TestMetadata {
+            category: TestCategory::KvmConfig,
+            label: "(KVM)",
+            description: "Reads /sys/module/kvm_amd/parameters/sev_snp for \"1\" or \"Y\"",
+            fix_hint: "options kvm_amd sev-snp=1 in /etc/modprobe.d/kvm.conf. Need kernel 6.11+",
+        },
+        _ if name.starts_with("Comparing TCB") || name.starts_with("Compare TCB") => TestMetadata {
+            category: TestCategory::Compliance,
+            label: "",
+            description: "Compares platform_tcb_version with reported_tcb_version from SNP_PLATFORM_STATUS",
+            fix_hint: "Run: sudo snphost commit or sudo snphost config set-reported-tcb",
+        },
+        _ if name.starts_with("Reading RMP table") || name.starts_with("RMP table address") || name.starts_with("Read RMP") => TestMetadata {
+            category: TestCategory::BiosConfigured,
+            label: "(BIOS)",
+            description: "Reads MSRs 0xC0010132 and 0xC0010133 for RMP base/end addresses",
+            fix_hint: "Enable SNP Memory Coverage in BIOS. Run: sudo modprobe msr",
+        },
+        _ => TestMetadata {
+            category: TestCategory::CpuInfo,
+            label: "",
+            description: "",
+            fix_hint: "",
+        },
+    }
+}
 
 struct Test {
     name: &'static str,
@@ -477,10 +750,19 @@ fn collect_tests() -> Vec<Test> {
 
 const INDENT: usize = 2;
 
-pub fn cmd(quiet: bool) -> Result<()> {
+pub fn cmd(quiet: bool, args: OkArgs) -> Result<()> {
     let tests = collect_tests();
+    let mode = args.output_mode();
+    let suppress_print = quiet || mode != OutputMode::Default;
 
-    if run_test(&tests, 0, quiet, SEV_MASK | ES_MASK | SNP_MASK) {
+    let mut entries: Vec<TestResultEntry> = Vec::new();
+    let passed = run_test(&tests, 0, suppress_print, SEV_MASK | ES_MASK | SNP_MASK, &mut entries);
+
+    if !quiet && mode != OutputMode::Default {
+        render_output(mode, &entries, passed);
+    }
+
+    if passed {
         Ok(())
     } else {
         Err(anyhow::anyhow!(
@@ -489,27 +771,46 @@ pub fn cmd(quiet: bool) -> Result<()> {
     }
 }
 
-fn run_test(tests: &[Test], level: usize, quiet: bool, mask: usize) -> bool {
+fn run_test(
+    tests: &[Test],
+    level: usize,
+    quiet: bool,
+    mask: usize,
+    entries: &mut Vec<TestResultEntry>,
+) -> bool {
     let mut passed = true;
 
     for t in tests {
         // Skip tests that aren't included in the specified generation.
         if (t.gen_mask & mask) != t.gen_mask {
             test_gen_not_included(t, level, quiet);
+            accumulate_skip(t, level, entries);
             continue;
         }
 
         let res = (t.run)();
         emit_result(&res, level, quiet);
+        let status_str = match res.stat {
+            TestState::Pass => "PASS",
+            TestState::Fail => "FAIL",
+            TestState::Skip => "SKIP",
+        };
+        entries.push(TestResultEntry {
+            name: res.name.clone(),
+            status: status_str.to_string(),
+            message: res.mesg.clone(),
+            level,
+        });
         match res.stat {
             TestState::Pass => {
-                if !run_test(&t.sub, level + INDENT, quiet, mask) {
+                if !run_test(&t.sub, level + INDENT, quiet, mask, entries) {
                     passed = false;
                 }
             }
             TestState::Fail => {
                 passed = false;
                 emit_skip(&t.sub, level + INDENT, quiet);
+                accumulate_skip_all(&t.sub, level + INDENT, entries);
             }
             // Skipped tests are marked as skip before recursing. They are just emitted and not actually processed.
             TestState::Skip => unreachable!(),
@@ -519,17 +820,113 @@ fn run_test(tests: &[Test], level: usize, quiet: bool, mask: usize) -> bool {
     passed
 }
 
+/// Accumulate a single skipped test and its subtests
+fn accumulate_skip(test: &Test, level: usize, entries: &mut Vec<TestResultEntry>) {
+    entries.push(TestResultEntry {
+        name: test.name.to_string(),
+        status: "SKIP".to_string(),
+        message: None,
+        level,
+    });
+    accumulate_skip_all(&test.sub, level + INDENT, entries);
+}
+
+/// Accumulate all tests as skipped (recursive)
+fn accumulate_skip_all(tests: &[Test], level: usize, entries: &mut Vec<TestResultEntry>) {
+    for t in tests {
+        entries.push(TestResultEntry {
+            name: t.name.to_string(),
+            status: "SKIP".to_string(),
+            message: None,
+            level,
+        });
+        accumulate_skip_all(&t.sub, level + INDENT, entries);
+    }
+}
+
+/// Placeholder renderer for non-default output modes
+fn render_output(mode: OutputMode, entries: &[TestResultEntry], _passed: bool) {
+    match mode {
+        OutputMode::Short => render_short(entries),
+        OutputMode::Verbose => render_verbose(entries),
+        OutputMode::Json => render_json(entries),
+        OutputMode::Default => {} // handled inline
+    }
+}
+
+fn render_short(entries: &[TestResultEntry]) {
+    // Placeholder - will be implemented in a later commit
+    let fail_count = entries.iter().filter(|e| e.status == "FAIL").count();
+    let pass_count = entries.iter().filter(|e| e.status == "PASS").count();
+    let skip_count = entries.iter().filter(|e| e.status == "SKIP").count();
+    let total = entries.len();
+    for e in entries {
+        if e.status == "FAIL" {
+            let msg = match &e.message {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            };
+            println!(" {} {}{}", "FAIL".red(), e.name, msg);
+        }
+    }
+    println!(
+        "\n{} tests: {} passed, {} failed, {} skipped",
+        total, pass_count, fail_count, skip_count
+    );
+}
+
+fn render_verbose(entries: &[TestResultEntry]) {
+    // Placeholder - will be implemented in a later commit
+    for e in entries {
+        let status_colored = match e.status.as_str() {
+            "PASS" => format!("{}", "PASS".green()),
+            "FAIL" => format!("{}", "FAIL".red()),
+            _ => format!("{}", "SKIP".yellow()),
+        };
+        let msg = match &e.message {
+            Some(m) => format!(": {}", m),
+            None => String::new(),
+        };
+        println!("[ {:^4} ] {:width$}- {}{}", status_colored, "", e.name, msg, width = e.level);
+    }
+}
+
+fn render_json(entries: &[TestResultEntry]) {
+    // Placeholder - will be implemented in a later commit
+    let results: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "name": e.name,
+                "status": e.status,
+                "message": e.message,
+            })
+        })
+        .collect();
+    let output = serde_json::json!({
+        "results": results,
+    });
+    println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+}
+
 fn emit_result(res: &TestResult, level: usize, quiet: bool) {
     if !quiet {
+        let meta = test_metadata(&res.name);
+        let label = if meta.label.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", meta.label)
+        };
         let msg = match &res.mesg {
             Some(m) => format!(": {}", m),
             None => "".to_string(),
         };
         println!(
-            "[ {:^4} ] {:width$}- {}{}",
+            "[ {:^4} ] {:width$}- {}{}{}",
             format!("{}", res.stat),
             "",
             res.name,
+            label,
             msg,
             width = level
         )
