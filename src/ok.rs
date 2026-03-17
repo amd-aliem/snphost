@@ -975,13 +975,19 @@ fn emit_result(res: &TestResult, level: usize, quiet: bool) {
             Some(m) => format!(": {}", m),
             None => "".to_string(),
         };
+        let hint = if res.stat == TestState::Fail && !meta.fix_hint.is_empty() {
+            format!("\n{:width$}  ^ hint: {}", "", meta.fix_hint, width = level + 10)
+        } else {
+            String::new()
+        };
         println!(
-            "[ {:^4} ] {:width$}- {}{}{}",
+            "[ {:^4} ] {:width$}- {}{}{}{}",
             format!("{}", res.stat),
             "",
             res.name,
             label,
             msg,
+            hint,
             width = level
         )
     }
