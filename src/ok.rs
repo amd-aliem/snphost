@@ -872,38 +872,51 @@ fn render_short(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion], _p
     let pass_count = entries.iter().filter(|e| e.status == "PASS").count();
     let skip_count = entries.iter().filter(|e| e.status == "SKIP").count();
     let total = entries.len();
-    for e in entries {
-        if e.status == "FAIL" {
-            let meta = test_metadata(&e.name);
-            let msg = match &e.message {
-                Some(m) => format!(": {}", m),
-                None => String::new(),
-            };
-            let hint = if meta.fix_hint.is_empty() {
-                String::new()
-            } else {
-                format!(" [hint: {}]", meta.fix_hint)
-            };
-            println!(" {} {}{}{}", "FAIL".red(), e.name, msg, hint);
+
+    if fail_count > 0 {
+        println!("{}", "Failures:".red());
+        for e in entries {
+            if e.status == "FAIL" {
+                let meta = test_metadata(&e.name);
+                let label = if meta.label.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", meta.label)
+                };
+                let msg = match &e.message {
+                    Some(m) => format!(": {}", m),
+                    None => String::new(),
+                };
+                let hint = if meta.fix_hint.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n    ^ hint: {}", meta.fix_hint)
+                };
+                println!("  {} {}{}{}{}", "FAIL".red(), e.name, label, msg, hint);
+            }
         }
     }
+
     // Software version issues
-    for v in sw_versions {
-        if v.status != "ok" && v.status != "optional_missing" {
+    let sw_issues: Vec<&SoftwareVersion> = sw_versions
+        .iter()
+        .filter(|v| v.status != "ok" && v.status != "optional_missing")
+        .collect();
+    if !sw_issues.is_empty() {
+        println!("\n{}", "Software issues:".yellow());
+        for v in sw_issues {
             let ver_str = v.version.as_deref().unwrap_or("not found");
-            println!(
-                " {} {}: {} ({})",
-                "WARN".yellow(),
-                v.name,
-                ver_str,
-                v.detail
-            );
+            println!("  {} {}: {} ({})", "WARN".yellow(), v.name, ver_str, v.detail);
         }
     }
+
     println!(
         "\n{} tests: {} passed, {} failed, {} skipped",
         total, pass_count, fail_count, skip_count
     );
+    if fail_count == 0 {
+        println!("{}", "All tests passed.".green());
+    }
 }
 
 fn render_verbose(entries: &[TestResultEntry], sw_versions: &[SoftwareVersion]) {
