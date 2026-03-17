@@ -12,11 +12,49 @@ use std::{
     str::from_utf8,
 };
 
+use clap::Args;
 use colorful::*;
 
 use msru::{Accessor, Msr};
 
 type TestFn = dyn Fn() -> TestResult;
+
+/// Arguments for the `ok` subcommand.
+#[derive(Args)]
+pub struct OkArgs {
+    /// Show only failures and summary counts
+    #[arg(long, conflicts_with_all = ["verbose", "json"])]
+    pub short: bool,
+
+    /// Show tests grouped by category with descriptions and recommended actions
+    #[arg(long, conflicts_with_all = ["short", "json"])]
+    pub verbose: bool,
+
+    /// Output results as JSON
+    #[arg(long, conflicts_with_all = ["short", "verbose"])]
+    pub json: bool,
+}
+
+enum OutputFormat {
+    Default,
+    Short,
+    Verbose,
+    Json,
+}
+
+impl OkArgs {
+    fn format(&self) -> OutputFormat {
+        if self.short {
+            OutputFormat::Short
+        } else if self.verbose {
+            OutputFormat::Verbose
+        } else if self.json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Default
+        }
+    }
+}
 
 // SEV generation-specific bitmasks.
 const SEV_MASK: usize = 1;
@@ -887,15 +925,28 @@ fn check_software_versions() -> Vec<SoftwareVersion> {
 
 const INDENT: usize = 2;
 
-pub fn cmd(quiet: bool) -> Result<()> {
+pub fn cmd(args: OkArgs, quiet: bool) -> Result<()> {
     let tests = collect_tests();
     let results = collect_results(&tests, 0, SEV_MASK | ES_MASK | SNP_MASK);
     let sw_versions = check_software_versions();
 
     if !quiet {
-        render_default(&results);
-        println!();
-        render_software_versions(&sw_versions);
+        match args.format() {
+            OutputFormat::Default => {
+                render_default(&results);
+                println!();
+                render_software_versions(&sw_versions);
+            }
+            OutputFormat::Short => {
+                render_short(&results, &sw_versions);
+            }
+            OutputFormat::Verbose => {
+                render_verbose(&results, &sw_versions);
+            }
+            OutputFormat::Json => {
+                render_json(&results, &sw_versions);
+            }
+        }
     }
 
     if has_failures(&results) {
@@ -905,6 +956,25 @@ pub fn cmd(quiet: bool) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+// Stub renderers for short, verbose, and JSON modes (implemented in subsequent commits).
+fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
+    render_default(results);
+    println!();
+    render_software_versions(sw_versions);
+}
+
+fn render_verbose(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
+    render_default(results);
+    println!();
+    render_software_versions(sw_versions);
+}
+
+fn render_json(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
+    render_default(results);
+    println!();
+    render_software_versions(sw_versions);
 }
 
 /// Run all tests and collect results into a tree, without printing.
