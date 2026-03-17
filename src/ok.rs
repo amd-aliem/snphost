@@ -8,25 +8,95 @@ use std::{
     fs::{self, File},
     mem::{transmute, MaybeUninit},
     os::unix::io::AsRawFd,
+    process::Command,
     str::from_utf8,
 };
 
+use clap::Args;
 use colorful::*;
 
 use msru::{Accessor, Msr};
 
 type TestFn = dyn Fn() -> TestResult;
 
+/// Arguments for the `ok` subcommand.
+#[derive(Args)]
+pub struct OkArgs {
+    /// Show only failures and summary counts
+    #[arg(long, conflicts_with_all = ["verbose", "json"])]
+    pub short: bool,
+
+    /// Show tests grouped by category with descriptions and recommended actions
+    #[arg(long, conflicts_with_all = ["short", "json"])]
+    pub verbose: bool,
+
+    /// Output results as JSON
+    #[arg(long, conflicts_with_all = ["short", "verbose"])]
+    pub json: bool,
+}
+
+enum OutputFormat {
+    Default,
+    Short,
+    Verbose,
+    Json,
+}
+
+impl OkArgs {
+    fn format(&self) -> OutputFormat {
+        if self.short {
+            OutputFormat::Short
+        } else if self.verbose {
+            OutputFormat::Verbose
+        } else if self.json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Default
+        }
+    }
+}
+
 // SEV generation-specific bitmasks.
 const SEV_MASK: usize = 1;
 const ES_MASK: usize = 1 << 1;
 const SNP_MASK: usize = 1 << 2;
+
+/// Category of test for grouping in verbose/JSON output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TestCategory {
+    CpuSupport,
+    CpuInfo,
+    BiosConfigured,
+    PlatformInitialized,
+    KvmConfig,
+    Compliance,
+}
+
+impl fmt::Display for TestCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CpuSupport => write!(f, "CPU Support"),
+            Self::CpuInfo => write!(f, "CPU Info"),
+            Self::BiosConfigured => write!(f, "BIOS Configured"),
+            Self::PlatformInitialized => write!(f, "Platform Initialized"),
+            Self::KvmConfig => write!(f, "KVM Config"),
+            Self::Compliance => write!(f, "Compliance"),
+        }
+    }
+}
 
 struct Test {
     name: &'static str,
     gen_mask: usize,
     run: Box<TestFn>,
     sub: Vec<Test>,
+    category: TestCategory,
+    /// Parenthetical label appended to test name, e.g. "(CPU)", "(BIOS)".
+    label: Option<&'static str>,
+    /// Short description of what this test checks (for verbose mode).
+    description: Option<&'static str>,
+    /// Suggested fix when this test fails.
+    fix_hint: Option<&'static str>,
 }
 
 struct TestResult {
@@ -35,7 +105,10 @@ struct TestResult {
     mesg: Option<String>,
 }
 
-#[derive(PartialEq, Eq)]
+const MSR_HINT: &str = "Load MSR kernel module: sudo modprobe msr";
+const SUDO_HINT: &str = "Run with sudo: sudo snphost ok";
+
+#[derive(Clone, PartialEq, Eq)]
 enum TestState {
     Pass,
     Skip,
@@ -96,11 +169,33 @@ impl fmt::Display for SevStatusTests {
     }
 }
 
+/// A collected test result node, forming a tree that mirrors the test hierarchy.
+struct TestResultNode {
+    name: String,
+    /// Display name may contain ANSI color codes (e.g. Page flush MSR).
+    /// Falls back to `name` when None.
+    display_name: Option<String>,
+    stat: TestState,
+    mesg: Option<String>,
+    level: usize,
+    children: Vec<TestResultNode>,
+    category: TestCategory,
+    label: Option<String>,
+    description: Option<String>,
+    fix_hint: Option<String>,
+}
+
 fn collect_tests() -> Vec<Test> {
-    let tests = vec![
+    use TestCategory::*;
+
+    vec![
         Test {
             name: "AMD CPU",
             gen_mask: SEV_MASK,
+            category: CpuSupport,
+            label: Some("CPU"),
+            description: Some("Checks CPU vendor string via CPUID is \"AuthenticAMD\""),
+            fix_hint: Some("SEV-SNP requires an AMD processor"),
             run: Box::new(|| {
                 let res = unsafe { x86_64::__cpuid(0x0000_0000) };
                 let name: [u8; 12] = unsafe { transmute([res.ebx, res.edx, res.ecx]) };
@@ -122,6 +217,10 @@ fn collect_tests() -> Vec<Test> {
                 Test {
                     name: "Microcode support",
                     gen_mask: SEV_MASK,
+                    category: CpuSupport,
+                    label: Some("CPU"),
+                    description: Some("Verifies processor brand string contains \"EPYC\" (server-class CPU required)"),
+                    fix_hint: Some("Need AMD EPYC 3rd Gen (Milan) or newer. Consumer Ryzen not supported"),
                     run: Box::new(|| {
                         let cpu_name = {
                             let mut bytestr = Vec::with_capacity(48);
@@ -157,6 +256,10 @@ fn collect_tests() -> Vec<Test> {
                 Test {
                     name: "Secure Memory Encryption (SME)",
                     gen_mask: SEV_MASK,
+                    category: CpuSupport,
+                    label: Some("CPU"),
+                    description: Some("Checks CPUID 0x8000001F EAX bit 0 for SME hardware support"),
+                    fix_hint: Some("Use AMD EPYC Naples or newer"),
                     run: Box::new(|| {
                         let res = unsafe { x86_64::__cpuid(0x8000_001f) };
 
@@ -175,6 +278,10 @@ fn collect_tests() -> Vec<Test> {
                     sub: vec![Test {
                         name: "SME",
                         gen_mask: SEV_MASK,
+                        category: BiosConfigured,
+                        label: Some("BIOS"),
+                        description: Some("Reads MSR 0xC0010010 (SYSCFG) bit 23 to verify SME enabled at system level"),
+                        fix_hint: Some("Enable in BIOS: CBS > CPU Common > SMEE. Run: sudo modprobe msr"),
                         run: Box::new(sme_test),
                         sub: vec![],
                     }],
@@ -182,10 +289,14 @@ fn collect_tests() -> Vec<Test> {
                 Test {
                     name: "Secure Encrypted Virtualization (SEV)",
                     gen_mask: SEV_MASK,
+                    category: CpuSupport,
+                    label: Some("CPU"),
+                    description: Some("Checks CPUID 0x8000001F EAX bit 1 for SEV hardware support"),
+                    fix_hint: Some("Ensure AMD EPYC processor with SEV support"),
                     run: Box::new(|| {
                         let res = unsafe { x86_64::__cpuid(0x8000_001f) };
 
-                        let stat = if ((res.eax & 0x1) << 1) != 0 {
+                        let stat = if (res.eax & (1 << 1)) != 0 {
                             TestState::Pass
                         } else {
                             TestState::Fail
@@ -201,16 +312,24 @@ fn collect_tests() -> Vec<Test> {
                         Test {
                             name: "SEV Firmware Version",
                             gen_mask: SNP_MASK,
+                            category: BiosConfigured,
+                            label: None,
+                            description: Some("Queries /dev/sev PLATFORM_STATUS for firmware version (requires >= 1.51 for SNP)"),
+                            fix_hint: Some("Run with sudo. Update BIOS to get firmware >= 1.51"),
                             run: Box::new(|| sev_ioctl(SevStatusTests::Firmware)),
                             sub: vec![],
                         },
                         Test {
                             name: "Encrypted State (SEV-ES)",
                             gen_mask: ES_MASK,
+                            category: CpuSupport,
+                            label: Some("CPU"),
+                            description: Some("Checks CPUID 0x8000001F EAX bit 3 for SEV-ES hardware support"),
+                            fix_hint: Some("Use AMD EPYC 2nd Gen (Rome) or newer"),
                             run: Box::new(|| {
                                 let res = unsafe { x86_64::__cpuid(0x8000_001f) };
 
-                                let stat = if ((res.eax & 0x1) << 3) != 0 {
+                                let stat = if (res.eax & (1 << 3)) != 0 {
                                     TestState::Pass
                                 } else {
                                     TestState::Fail
@@ -225,6 +344,10 @@ fn collect_tests() -> Vec<Test> {
                             sub: vec![Test {
                                 name: "SEV-ES initialized",
                                 gen_mask: ES_MASK,
+                                category: PlatformInitialized,
+                                label: Some("FW Ready"),
+                                description: Some("Queries SEV platform status flags bit 8 for SEV-ES initialization"),
+                                fix_hint: Some("Run with sudo. Ensure kvm_amd loaded with sev-es=1"),
                                 run: Box::new(|| sev_ioctl(SevStatusTests::SevEs)),
                                 sub: vec![],
                             }],
@@ -232,16 +355,24 @@ fn collect_tests() -> Vec<Test> {
                         Test {
                             name: "SEV initialized",
                             gen_mask: SNP_MASK,
+                            category: PlatformInitialized,
+                            label: Some("FW Ready"),
+                            description: Some("Queries SEV platform status state field (must be Initialized or Working)"),
+                            fix_hint: Some("Run with sudo. Load: sudo modprobe kvm_amd sev=1"),
                             run: Box::new(|| sev_ioctl(SevStatusTests::Sev)),
                             sub: vec![],
                         },
                         Test {
                             name: "Secure Nested Paging (SEV-SNP)",
                             gen_mask: SNP_MASK,
+                            category: CpuSupport,
+                            label: Some("CPU"),
+                            description: Some("Checks CPUID 0x8000001F EAX bit 4 for SEV-SNP hardware support"),
+                            fix_hint: Some("Requires AMD EPYC 3rd Gen (Milan) or newer"),
                             run: Box::new(|| {
                                 let res = unsafe { x86_64::__cpuid(0x8000_001f) };
 
-                                let stat = if ((res.eax & 0x1) << 4) != 0 {
+                                let stat = if (res.eax & (1 << 4)) != 0 {
                                     TestState::Pass
                                 } else {
                                     TestState::Fail
@@ -257,10 +388,14 @@ fn collect_tests() -> Vec<Test> {
                                 Test {
                                     name: "VM Permission Levels",
                                     gen_mask: SNP_MASK,
+                                    category: CpuSupport,
+                                    label: Some("CPU"),
+                                    description: Some("Checks CPUID 0x8000001F EAX bit 5 for VMPL hardware support"),
+                                    fix_hint: Some("Check for BIOS update or verify processor model"),
                                     run: Box::new(|| {
                                         let res = unsafe { x86_64::__cpuid(0x8000_001f) };
 
-                                        let stat = if ((res.eax & 0x1) << 5) != 0 {
+                                        let stat = if (res.eax & (1 << 5)) != 0 {
                                             TestState::Pass
                                         } else {
                                             TestState::Fail
@@ -275,6 +410,10 @@ fn collect_tests() -> Vec<Test> {
                                     sub: vec![Test {
                                         name: "Number of VMPLs",
                                         gen_mask: SNP_MASK,
+                                        category: CpuInfo,
+                                        label: None,
+                                        description: Some("Reads CPUID 0x8000001F EBX bits 15:12 for VMPL count (expected: 4)"),
+                                        fix_hint: None,
                                         run: Box::new(|| {
                                             let res = unsafe { x86_64::__cpuid(0x8000_001f) };
                                             let num_vmpls = (res.ebx & 0xF000) >> 12;
@@ -291,29 +430,49 @@ fn collect_tests() -> Vec<Test> {
                                 Test {
                                     name: "SEV-SNP",
                                     gen_mask: SNP_MASK,
+                                    category: BiosConfigured,
+                                    label: Some("BIOS"),
+                                    description: Some("Reads MSR 0xC0010010 (SYSCFG) bit 24 to verify SNP enabled at system level"),
+                                    fix_hint: Some("Enable in BIOS: CBS > CPU Common > SNP Memory Coverage. Run: sudo modprobe msr"),
                                     run: Box::new(snp_test),
                                     sub: vec![],
                                 },
                                 Test {
                                     name: "SNP initialized",
                                     gen_mask: SNP_MASK,
+                                    category: PlatformInitialized,
+                                    label: Some("FW Ready"),
+                                    description: Some("Queries SNP_PLATFORM_STATUS state field = 1 (INIT state)"),
+                                    fix_hint: Some("Run with sudo. Need kernel 6.11+. Load: sudo modprobe kvm_amd sev_snp=1"),
                                     run: Box::new(|| snp_ioctl(SnpStatusTest::Snp)),
                                     sub: vec![
                                         Test {
                                             name: "Read RMP tables",
                                             gen_mask: SNP_MASK,
+                                            category: BiosConfigured,
+                                            label: Some("BIOS"),
+                                            description: Some("Reads MSRs 0xC0010132 and 0xC0010133 for RMP base/end addresses"),
+                                            fix_hint: Some("Enable SNP Memory Coverage in BIOS. Run: sudo modprobe msr"),
                                             run: Box::new(get_rmp_address),
                                             sub: vec![],
                                         },
                                         Test {
                                             name: "RMP table initialized",
                                             gen_mask: SNP_MASK,
+                                            category: PlatformInitialized,
+                                            label: Some("FW Ready"),
+                                            description: Some("Queries SNP platform status IS_RMP_INIT bit"),
+                                            fix_hint: Some("Run with sudo. Need CONFIG_KVM_AMD_SEV=y. Reboot if firmware was updated"),
                                             run: Box::new(|| snp_ioctl(SnpStatusTest::Rmp)),
                                             sub: vec![],
                                         },
                                         Test {
                                             name: "Alias check",
                                             gen_mask: SNP_MASK,
+                                            category: Compliance,
+                                            label: Some("Compliance"),
+                                            description: Some("Queries SNP platform status ALIAS_CHECK_COMPLETE bit (CVE-2024-21944 mitigation)"),
+                                            fix_hint: Some("Update SEV firmware and BIOS per AMD-SB-3015. Reboot required"),
                                             run: Box::new(|| snp_ioctl(SnpStatusTest::AliasCheck)),
                                             sub: vec![],
                                         },
@@ -324,6 +483,10 @@ fn collect_tests() -> Vec<Test> {
                         Test {
                             name: "Physical address bit reduction",
                             gen_mask: SEV_MASK,
+                            category: CpuInfo,
+                            label: None,
+                            description: Some("Reads CPUID 0x8000001F EBX bits 11:6 for PA bit reduction value"),
+                            fix_hint: None,
                             run: Box::new(|| {
                                 let res = unsafe { x86_64::__cpuid(0x8000_001f) };
                                 let field = (res.ebx & 0b1111_1100_0000) >> 6;
@@ -339,6 +502,10 @@ fn collect_tests() -> Vec<Test> {
                         Test {
                             name: "C-bit location",
                             gen_mask: SEV_MASK,
+                            category: CpuInfo,
+                            label: None,
+                            description: Some("Reads CPUID 0x8000001F EBX bits 5:0 for encryption bit position in page tables"),
+                            fix_hint: None,
                             run: Box::new(|| {
                                 let res = unsafe { x86_64::__cpuid(0x8000_001f) };
                                 let field = res.ebx & 0b11_1111;
@@ -354,6 +521,10 @@ fn collect_tests() -> Vec<Test> {
                         Test {
                             name: "Number of encrypted guests supported simultaneously",
                             gen_mask: SEV_MASK,
+                            category: CpuInfo,
+                            label: None,
+                            description: Some("Reads CPUID 0x8000001F ECX for maximum encrypted guest count"),
+                            fix_hint: None,
                             run: Box::new(|| {
                                 let res = unsafe { x86_64::__cpuid(0x8000_001f) };
                                 let field = res.ecx;
@@ -370,6 +541,10 @@ fn collect_tests() -> Vec<Test> {
                         Test {
                             name: "Minimum ASID value for SEV-enabled, SEV-ES disabled guest",
                             gen_mask: SEV_MASK,
+                            category: CpuInfo,
+                            label: None,
+                            description: Some("Reads CPUID 0x8000001F EDX for minimum SEV-only ASID value"),
+                            fix_hint: None,
                             run: Box::new(|| {
                                 let res = unsafe { x86_64::__cpuid(0x8000_001f) };
                                 let field = res.edx;
@@ -387,12 +562,20 @@ fn collect_tests() -> Vec<Test> {
                         Test {
                             name: "/dev/sev readable",
                             gen_mask: SEV_MASK,
+                            category: PlatformInitialized,
+                            label: None,
+                            description: Some("Attempts to open /dev/sev device for reading"),
+                            fix_hint: Some("Run with sudo. Load PSP driver: sudo modprobe ccp. Must run on baremetal"),
                             run: Box::new(dev_sev_r),
                             sub: vec![],
                         },
                         Test {
                             name: "/dev/sev writable",
                             gen_mask: SEV_MASK,
+                            category: PlatformInitialized,
+                            label: None,
+                            description: Some("Attempts to open /dev/sev device for writing"),
+                            fix_hint: Some("Run with sudo. Must run on baremetal. Check SELinux/AppArmor policies"),
                             run: Box::new(dev_sev_w),
                             sub: vec![],
                         },
@@ -401,10 +584,15 @@ fn collect_tests() -> Vec<Test> {
                 Test {
                     name: "Page flush MSR",
                     gen_mask: SEV_MASK,
+                    category: CpuInfo,
+                    label: None,
+                    description: Some("Checks CPUID 0x8000001F EAX bit 2 for page flush MSR optimization support"),
+                    fix_hint: None,
                     run: Box::new(|| {
                         let res = unsafe { x86_64::__cpuid(0x8000_001f) };
 
-                        let msr_flag = if ((res.eax & 0x1) << 2) != 0 {
+                        let enabled = (res.eax & (1 << 2)) != 0;
+                        let msr_flag = if enabled {
                             "ENABLED".green()
                         } else {
                             "DISABLED".yellow()
@@ -426,7 +614,7 @@ fn collect_tests() -> Vec<Test> {
                              * disabled.
                              */
                             stat: TestState::Pass,
-                            mesg: None,
+                            mesg: Some(if enabled { "ENABLED" } else { "DISABLED" }.to_string()),
                         }
                     }),
                     sub: vec![],
@@ -434,147 +622,910 @@ fn collect_tests() -> Vec<Test> {
             ],
         },
         Test {
-            name: "KVM Support",
+            name: "KVM supported",
             gen_mask: SEV_MASK,
+            category: KvmConfig,
+            label: Some("KVM"),
+            description: Some("Opens /dev/kvm and queries KVM API version via ioctl"),
+            fix_hint: Some("Run with sudo. Load: sudo modprobe kvm && sudo modprobe kvm_amd. Enable SVM in BIOS"),
             run: Box::new(has_kvm_support),
             sub: vec![
                 Test {
                     name: "SEV enabled in KVM",
                     gen_mask: SEV_MASK,
+                    category: KvmConfig,
+                    label: Some("KVM"),
+                    description: Some("Reads /sys/module/kvm_amd/parameters/sev for \"1\" or \"Y\""),
+                    fix_hint: Some("Set: options kvm_amd sev=1 in /etc/modprobe.d/kvm.conf"),
                     run: Box::new(|| sev_enabled_in_kvm(SevGeneration::Sev)),
                     sub: vec![],
                 },
                 Test {
                     name: "SEV-ES enabled in KVM",
                     gen_mask: ES_MASK,
+                    category: KvmConfig,
+                    label: Some("KVM"),
+                    description: Some("Reads /sys/module/kvm_amd/parameters/sev_es for \"1\" or \"Y\""),
+                    fix_hint: Some("Set: options kvm_amd sev-es=1 in /etc/modprobe.d/kvm.conf"),
                     run: Box::new(|| sev_enabled_in_kvm(SevGeneration::Es)),
                     sub: vec![],
                 },
                 Test {
                     name: "SEV-SNP enabled in KVM",
                     gen_mask: SNP_MASK,
+                    category: KvmConfig,
+                    label: Some("KVM"),
+                    description: Some("Reads /sys/module/kvm_amd/parameters/sev_snp for \"1\" or \"Y\""),
+                    fix_hint: Some("Set: options kvm_amd sev-snp=1 in /etc/modprobe.d/kvm.conf. Need kernel 6.11+"),
                     run: Box::new(|| sev_enabled_in_kvm(SevGeneration::Snp)),
                     sub: vec![],
                 },
             ],
         },
         Test {
-            name: "memlock limit",
+            name: "Memlock resource limit",
             gen_mask: SEV_MASK,
+            category: Compliance,
+            label: Some("Compliance"),
+            description: Some("Reads RLIMIT_MEMLOCK soft and hard limits via getrlimit syscall"),
+            fix_hint: Some("Set memlock unlimited: edit /etc/security/limits.conf or systemd LimitMEMLOCK=infinity"),
             run: Box::new(memlock_rlimit),
             sub: vec![],
         },
         Test {
-            name: "Compare TCB values",
+            name: "Comparing TCB values",
             gen_mask: SNP_MASK,
+            category: Compliance,
+            label: Some("Compliance"),
+            description: Some("Compares platform_tcb_version with reported_tcb_version from SNP_PLATFORM_STATUS"),
+            fix_hint: Some("Run: sudo snphost commit (irreversible) or sudo snphost config set-reported-tcb"),
             run: Box::new(|| snp_ioctl(SnpStatusTest::Tcb)),
             sub: vec![],
         },
-    ];
+    ]
+}
 
-    tests
+// ---------------------------------------------------------------------------
+// Software version checks
+// ---------------------------------------------------------------------------
+
+struct SoftwareVersion {
+    component: String,
+    path: Option<String>,
+    installed_version: Option<String>,
+    min_version: Option<String>,
+    status: SwVersionStatus,
+}
+
+#[derive(PartialEq, Eq)]
+enum SwVersionStatus {
+    Supported,
+    NotInstalled,
+    TooOld,
+    PermissionDenied,
+    Unknown,
+}
+
+/// Compare two dotted version strings (e.g. "6.14" >= "6.11").
+/// Returns true if `have` >= `need`.
+fn version_ge(have: &str, need: &str) -> bool {
+    let parse = |s: &str| -> Vec<u64> {
+        s.split('.')
+            .filter_map(|p| {
+                // Strip non-numeric suffixes (e.g. "37-generic" -> "37")
+                let numeric: String = p.chars().take_while(|c| c.is_ascii_digit()).collect();
+                numeric.parse().ok()
+            })
+            .collect()
+    };
+    let h = parse(have);
+    let n = parse(need);
+    for i in 0..h.len().max(n.len()) {
+        let hv = h.get(i).copied().unwrap_or(0);
+        let nv = n.get(i).copied().unwrap_or(0);
+        if hv != nv {
+            return hv > nv;
+        }
+    }
+    true // equal
+}
+
+fn check_qemu_version() -> SoftwareVersion {
+    let binary = "/usr/bin/qemu-system-x86_64";
+    let path = if std::path::Path::new(binary).exists() {
+        Some(binary.to_string())
+    } else {
+        None
+    };
+
+    let version = path.as_ref().and_then(|p| {
+        Command::new(p)
+            .arg("--version")
+            .output()
+            .ok()
+            .and_then(|o| {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                // Parse: "QEMU emulator version X.Y.Z ..."
+                stdout
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split("version ").nth(1))
+                    .map(|v| v.split_whitespace().next().unwrap_or(v).to_string())
+            })
+    });
+
+    let min = "6.0";
+    let status = match (&path, &version) {
+        (None, _) => SwVersionStatus::NotInstalled,
+        (_, None) => SwVersionStatus::Unknown,
+        (_, Some(v)) => {
+            if version_ge(v, min) {
+                SwVersionStatus::Supported
+            } else {
+                SwVersionStatus::TooOld
+            }
+        }
+    };
+
+    SoftwareVersion {
+        component: "QEMU".to_string(),
+        path,
+        installed_version: version,
+        min_version: Some(min.to_string()),
+        status,
+    }
+}
+
+fn check_libvirt_version() -> SoftwareVersion {
+    let version = Command::new("virsh")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let min = "4.5";
+    let status = match &version {
+        None => SwVersionStatus::NotInstalled,
+        Some(v) => {
+            if version_ge(v, min) {
+                SwVersionStatus::Supported
+            } else {
+                SwVersionStatus::TooOld
+            }
+        }
+    };
+
+    SoftwareVersion {
+        component: "libvirt".to_string(),
+        path: None,
+        installed_version: version,
+        min_version: Some(min.to_string()),
+        status,
+    }
+}
+
+fn check_ovmf_version() -> SoftwareVersion {
+    let paths = [
+        // Ubuntu/Debian
+        "/usr/share/ovmf/OVMF.amdsev.fd",
+        "/usr/share/OVMF/OVMF_CODE_4M.fd",
+        // RHEL/Fedora (edk2)
+        "/usr/share/edk2/ovmf/OVMF_CODE.fd",
+        "/usr/share/edk2/x64/OVMF_CODE.fd",
+        // SUSE
+        "/usr/share/qemu/ovmf-x86_64-smm-ms-code.bin",
+    ];
+    let found_path = paths.iter().find(|p| std::path::Path::new(p).exists());
+
+    let version = Command::new("dpkg-query")
+        .args(["--showformat=${Version}", "--show", "ovmf"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            Command::new("rpm")
+                .args(["-q", "--qf", "%{VERSION}", "edk2-ovmf"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                })
+        });
+
+    let status = match (&found_path, &version) {
+        (None, _) => SwVersionStatus::NotInstalled,
+        (Some(_), None) => SwVersionStatus::Unknown,
+        (Some(_), Some(_)) => SwVersionStatus::Supported,
+    };
+
+    SoftwareVersion {
+        component: "OVMF".to_string(),
+        path: found_path.map(|p| p.to_string()),
+        installed_version: version,
+        min_version: None,
+        status,
+    }
+}
+
+fn check_kernel_version() -> SoftwareVersion {
+    let version = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .ok();
+
+    let min = "6.11";
+    let status = match &version {
+        None => SwVersionStatus::Unknown,
+        Some(v) => {
+            if version_ge(v, min) {
+                SwVersionStatus::Supported
+            } else {
+                SwVersionStatus::TooOld
+            }
+        }
+    };
+
+    SoftwareVersion {
+        component: "Kernel".to_string(),
+        path: None,
+        installed_version: version,
+        min_version: Some(min.to_string()),
+        status,
+    }
+}
+
+fn check_sev_firmware_version() -> SoftwareVersion {
+    let min = "1.51";
+    match sev_platform_status() {
+        Ok(status) => {
+            let ver = format!("{}", status.build.version);
+            let ok = version_ge(&ver, min);
+            SoftwareVersion {
+                component: "SEV Firmware".to_string(),
+                path: Some("/dev/sev".to_string()),
+                installed_version: Some(ver),
+                min_version: Some(min.to_string()),
+                status: if ok {
+                    SwVersionStatus::Supported
+                } else {
+                    SwVersionStatus::TooOld
+                },
+            }
+        }
+        Err(e) => {
+            let err_str = format!("{e}");
+            let status = if err_str.contains("Permission denied") || err_str.contains("unable to open") {
+                SwVersionStatus::PermissionDenied
+            } else {
+                SwVersionStatus::Unknown
+            };
+            SoftwareVersion {
+                component: "SEV Firmware".to_string(),
+                path: Some("/dev/sev".to_string()),
+                installed_version: None,
+                min_version: Some(min.to_string()),
+                status,
+            }
+        }
+    }
+}
+
+fn check_software_versions() -> Vec<SoftwareVersion> {
+    vec![
+        check_qemu_version(),
+        check_libvirt_version(),
+        check_ovmf_version(),
+        check_kernel_version(),
+        check_sev_firmware_version(),
+    ]
 }
 
 const INDENT: usize = 2;
 
-pub fn cmd(quiet: bool) -> Result<()> {
+pub fn cmd(args: OkArgs, quiet: bool) -> Result<()> {
     let tests = collect_tests();
+    let results = collect_results(&tests, 0, SEV_MASK | ES_MASK | SNP_MASK);
+    let sw_versions = check_software_versions();
 
-    if run_test(&tests, 0, quiet, SEV_MASK | ES_MASK | SNP_MASK) {
-        Ok(())
-    } else {
+    if !quiet {
+        match args.format() {
+            OutputFormat::Default => {
+                render_default(&results);
+                println!();
+                render_software_versions(&sw_versions);
+            }
+            OutputFormat::Short => {
+                render_short(&results, &sw_versions);
+            }
+            OutputFormat::Verbose => {
+                render_verbose(&results, &sw_versions);
+            }
+            OutputFormat::Json => {
+                render_json(&results, &sw_versions);
+            }
+        }
+    }
+
+    if has_failures(&results) {
         Err(anyhow::anyhow!(
             "One or more tests in snphost ok reported a failure"
         ))
+    } else {
+        Ok(())
     }
 }
 
-fn run_test(tests: &[Test], level: usize, quiet: bool, mask: usize) -> bool {
-    let mut passed = true;
+/// Count pass/fail/skip across the entire result tree.
+fn count_results(results: &[TestResultNode]) -> (usize, usize, usize) {
+    let (mut pass, mut fail, mut skip) = (0, 0, 0);
+    for r in results {
+        match r.stat {
+            TestState::Pass => pass += 1,
+            TestState::Fail => fail += 1,
+            TestState::Skip => skip += 1,
+        }
+        let (p, f, s) = count_results(&r.children);
+        pass += p;
+        fail += f;
+        skip += s;
+    }
+    (pass, fail, skip)
+}
+
+/// Collect all failure nodes from the result tree.
+fn collect_failures(results: &[TestResultNode]) -> Vec<&TestResultNode> {
+    let mut failures = Vec::new();
+    for r in results {
+        if r.stat == TestState::Fail {
+            failures.push(r);
+        }
+        failures.extend(collect_failures(&r.children));
+    }
+    failures
+}
+
+fn collect_skipped(results: &[TestResultNode]) -> Vec<&TestResultNode> {
+    let mut skipped = Vec::new();
+    for r in results {
+        if r.stat == TestState::Skip {
+            skipped.push(r);
+        }
+        skipped.extend(collect_skipped(&r.children));
+    }
+    skipped
+}
+
+/// Short mode: failures-only compact output with summary counts.
+fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
+    let (mut pass, mut fail, mut skip) = count_results(results);
+    for v in sw_versions {
+        match v.status {
+            SwVersionStatus::Supported => pass += 1,
+            SwVersionStatus::TooOld | SwVersionStatus::PermissionDenied => fail += 1,
+            SwVersionStatus::NotInstalled | SwVersionStatus::Unknown => skip += 1,
+        }
+    }
+    let total = pass + fail + skip;
+    println!("snphost ok: {}/{} passed, {} failed, {} skipped", pass, total, fail, skip);
+
+    let failures = collect_failures(results);
+    if !failures.is_empty() {
+        println!("\nFAILURES:");
+        for f in &failures {
+            let msg = match &f.mesg {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            };
+            let label = match &f.label {
+                Some(l) => format!(" ({})", l),
+                None => String::new(),
+            };
+            println!("  [{}] {}{}{}", "FAIL".red(), f.name, label, msg);
+            if let Some(hint) = &f.fix_hint {
+                println!("    {} {}", "Hint:".blue(), hint);
+            }
+        }
+    }
+
+    // Show skipped items
+    let skipped = collect_skipped(results);
+    let sw_skipped: Vec<&SoftwareVersion> = sw_versions
+        .iter()
+        .filter(|v| v.status == SwVersionStatus::NotInstalled || v.status == SwVersionStatus::Unknown)
+        .collect();
+    if !skipped.is_empty() || !sw_skipped.is_empty() {
+        println!("\nSKIPPED:");
+        for s in &skipped {
+            println!("  [{}] {}", "SKIP".yellow(), s.name);
+        }
+        for v in &sw_skipped {
+            println!("  [{}] {} (Software)", "SKIP".yellow(), v.component);
+        }
+    }
+
+    // Show software version issues
+    let sw_issues: Vec<&SoftwareVersion> = sw_versions
+        .iter()
+        .filter(|v| v.status == SwVersionStatus::TooOld || v.status == SwVersionStatus::PermissionDenied)
+        .collect();
+    if !sw_issues.is_empty() {
+        println!("\nSOFTWARE ISSUES:");
+        for v in &sw_issues {
+            let ver = v.installed_version.as_deref().unwrap_or("N/A");
+            let min = v.min_version.as_deref().unwrap_or("N/A");
+            match v.status {
+                SwVersionStatus::TooOld => {
+                    println!("  [{}] {}: {} (min: {})", "FAIL".red(), v.component, ver, min);
+                }
+                SwVersionStatus::PermissionDenied => {
+                    println!("  [{}] {}: Permission denied (min: {})", "FAIL".red(), v.component, min);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Flatten the result tree into a list of nodes for grouping by category.
+fn flatten_results(results: &[TestResultNode]) -> Vec<&TestResultNode> {
+    let mut flat = Vec::new();
+    for r in results {
+        flat.push(r);
+        flat.extend(flatten_results(&r.children));
+    }
+    flat
+}
+
+/// Verbose mode: tests grouped by category with descriptions and recommended actions.
+fn render_verbose(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
+    let flat = flatten_results(results);
+
+    // Group by category (sorted by enum order since TestCategory derives Ord).
+    let categories = [
+        TestCategory::CpuSupport,
+        TestCategory::CpuInfo,
+        TestCategory::BiosConfigured,
+        TestCategory::PlatformInitialized,
+        TestCategory::KvmConfig,
+        TestCategory::Compliance,
+    ];
+
+    for cat in &categories {
+        let in_cat: Vec<&&TestResultNode> = flat.iter().filter(|n| n.category == *cat).collect();
+        if in_cat.is_empty() {
+            continue;
+        }
+        println!("{}:", cat);
+        for node in &in_cat {
+            let msg = match &node.mesg {
+                Some(m) => {
+                    let indented = m.replace('\n', "\n             ");
+                    format!(": {}", indented.trim())
+                }
+                None => String::new(),
+            };
+            println!("  [ {:^4} ] {}{}", format!("{}", node.stat), node.name, msg);
+            if let Some(desc) = &node.description {
+                println!("           {}", desc);
+            }
+            if node.stat == TestState::Fail {
+                if let Some(hint) = &node.fix_hint {
+                    println!(
+                        "           {} {}",
+                        "Recommended action:".red(),
+                        hint
+                    );
+                }
+            }
+        }
+        println!();
+    }
+
+    // Software versions section
+    println!("Installed Components:");
+    for v in sw_versions {
+        let stat_display = match v.status {
+            SwVersionStatus::Supported => TestState::Pass,
+            SwVersionStatus::TooOld => TestState::Fail,
+            SwVersionStatus::PermissionDenied => TestState::Fail,
+            SwVersionStatus::NotInstalled => TestState::Skip,
+            SwVersionStatus::Unknown => TestState::Skip,
+        };
+        let ver = v.installed_version.as_deref().unwrap_or("N/A");
+        let min_str = match &v.min_version {
+            Some(m) => format!(" (min: {})", m),
+            None => String::new(),
+        };
+        let detail = match v.status {
+            SwVersionStatus::NotInstalled => format!("Not installed{}", min_str),
+            SwVersionStatus::PermissionDenied => format!("Permission denied{}", min_str),
+            _ => format!("{}{}", ver, min_str),
+        };
+        println!("  [ {:^4} ] {}: {}", format!("{}", stat_display), v.component, detail);
+    }
+
+    // DETECTED ISSUES summary
+    let failures = collect_failures(results);
+    if !failures.is_empty() {
+        println!();
+        println!("DETECTED ISSUES:");
+        for f in &failures {
+            let msg = match &f.mesg {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            };
+            println!("  * {}{}", f.name, msg);
+            if let Some(hint) = &f.fix_hint {
+                println!("    {} {}", "Hint:".blue(), hint);
+            }
+        }
+        println!();
+        println!("For detailed troubleshooting, see: https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md");
+    }
+}
+
+/// JSON-serializable representation of a test result.
+#[derive(serde::Serialize)]
+struct JsonTestResult {
+    name: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    category: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tcb: Option<JsonTcb>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<JsonTestResult>,
+}
+
+/// Structured TCB version comparison for JSON output.
+#[derive(serde::Serialize)]
+struct JsonTcb {
+    versions_match: bool,
+    platform: JsonTcbVersion,
+    reported: JsonTcbVersion,
+}
+
+/// Individual TCB version components.
+#[derive(serde::Serialize)]
+struct JsonTcbVersion {
+    microcode: u8,
+    snp: u8,
+    tee: u8,
+    boot_loader: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fmc: Option<u8>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonSoftwareVersion {
+    component: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    installed_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_version: Option<String>,
+    status: String,
+}
+
+#[derive(serde::Serialize)]
+struct JsonSummary {
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    total: usize,
+}
+
+#[derive(serde::Serialize)]
+struct JsonOutput {
+    tests: Vec<JsonTestResult>,
+    software: Vec<JsonSoftwareVersion>,
+    summary: JsonSummary,
+    docs: &'static str,
+}
+
+fn to_json_tcb_version(tcb: &sev::firmware::host::TcbVersion) -> JsonTcbVersion {
+    JsonTcbVersion {
+        microcode: tcb.microcode,
+        snp: tcb.snp,
+        tee: tcb.tee,
+        boot_loader: tcb.bootloader,
+        fmc: tcb.fmc,
+    }
+}
+
+fn to_json_test(node: &TestResultNode) -> JsonTestResult {
+    let is_tcb = node.name == "Compare TCB values" || node.name == "Comparing TCB values";
+    let tcb = if is_tcb {
+        // Query platform status to get structured TCB data for JSON
+        snp_platform_status().ok().map(|status| JsonTcb {
+            versions_match: status.platform_tcb_version == status.reported_tcb_version,
+            platform: to_json_tcb_version(&status.platform_tcb_version),
+            reported: to_json_tcb_version(&status.reported_tcb_version),
+        })
+    } else {
+        None
+    };
+
+    // For TCB test, use a short message instead of the raw multi-line dump
+    let message = if is_tcb {
+        node.mesg.as_ref().map(|m| {
+            if m.starts_with("TCB versions match") {
+                "TCB versions match".to_string()
+            } else {
+                "TCB versions do NOT match".to_string()
+            }
+        })
+    } else {
+        node.mesg.clone()
+    };
+
+    JsonTestResult {
+        name: node.name.clone(),
+        status: match node.stat {
+            TestState::Pass => "pass".to_string(),
+            TestState::Fail => "fail".to_string(),
+            TestState::Skip => "skip".to_string(),
+        },
+        message,
+        category: match node.category {
+            TestCategory::CpuSupport => "cpu_support",
+            TestCategory::CpuInfo => "cpu_info",
+            TestCategory::BiosConfigured => "bios_configured",
+            TestCategory::PlatformInitialized => "platform_initialized",
+            TestCategory::KvmConfig => "kvm_config",
+            TestCategory::Compliance => "compliance",
+        }
+        .to_string(),
+        label: node.label.clone(),
+        description: node.description.clone(),
+        fix_hint: node.fix_hint.clone(),
+        tcb,
+        children: node.children.iter().map(to_json_test).collect(),
+    }
+}
+
+fn to_json_sw(v: &SoftwareVersion) -> JsonSoftwareVersion {
+    JsonSoftwareVersion {
+        component: v.component.clone(),
+        path: v.path.clone(),
+        installed_version: v.installed_version.clone(),
+        min_version: v.min_version.clone(),
+        status: match v.status {
+            SwVersionStatus::Supported => "supported",
+            SwVersionStatus::NotInstalled => "not_installed",
+            SwVersionStatus::TooOld => "too_old",
+            SwVersionStatus::PermissionDenied => "permission_denied",
+            SwVersionStatus::Unknown => "unknown",
+        }
+        .to_string(),
+    }
+}
+
+/// JSON mode: machine-readable output with all metadata.
+fn render_json(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
+    let (mut pass, mut fail, mut skip) = count_results(results);
+    for v in sw_versions {
+        match v.status {
+            SwVersionStatus::Supported => pass += 1,
+            SwVersionStatus::TooOld | SwVersionStatus::PermissionDenied => fail += 1,
+            SwVersionStatus::NotInstalled | SwVersionStatus::Unknown => skip += 1,
+        }
+    }
+    let output = JsonOutput {
+        tests: results.iter().map(to_json_test).collect(),
+        software: sw_versions.iter().map(to_json_sw).collect(),
+        summary: JsonSummary {
+            passed: pass,
+            failed: fail,
+            skipped: skip,
+            total: pass + fail + skip,
+        },
+        docs: "https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md",
+    };
+    // JSON output goes to stdout; errors in has_failures() still go to stderr.
+    println!("{}", serde_json::to_string_pretty(&output).expect("Failed to serialize JSON output"));
+}
+
+/// Run all tests and collect results into a tree, without printing.
+fn collect_results(tests: &[Test], level: usize, mask: usize) -> Vec<TestResultNode> {
+    let mut results = Vec::new();
 
     for t in tests {
         // Skip tests that aren't included in the specified generation.
         if (t.gen_mask & mask) != t.gen_mask {
-            test_gen_not_included(t, level, quiet);
+            results.push(make_skip_node(t, level));
             continue;
         }
 
         let res = (t.run)();
-        emit_result(&res, level, quiet);
-        match res.stat {
-            TestState::Pass => {
-                if !run_test(&t.sub, level + INDENT, quiet, mask) {
-                    passed = false;
-                }
-            }
-            TestState::Fail => {
-                passed = false;
-                emit_skip(&t.sub, level + INDENT, quiet);
-            }
-            // Skipped tests are marked as skip before recursing. They are just emitted and not actually processed.
+        let children = match res.stat {
+            TestState::Pass => collect_results(&t.sub, level + INDENT, mask),
+            TestState::Fail => make_skip_tree(&t.sub, level + INDENT),
             TestState::Skip => unreachable!(),
-        }
+        };
+
+        // Override the fix hint based on the actual failure mode, so the
+        // user sees actionable advice rather than a generic BIOS hint.
+        let fix_hint = if res.stat == TestState::Fail {
+            if let Some(m) = res.mesg.as_ref() {
+                if m.contains("MSR read failed") || m.contains("Failed to read the desired MSR") {
+                    Some(MSR_HINT.to_string())
+                } else if m.contains("unable to open /dev/sev") || m.contains("Permission denied") {
+                    Some(SUDO_HINT.to_string())
+                } else {
+                    t.fix_hint.map(|s| s.to_string())
+                }
+            } else {
+                t.fix_hint.map(|s| s.to_string())
+            }
+        } else {
+            t.fix_hint.map(|s| s.to_string())
+        };
+
+        let display_name = if res.name != t.name {
+            Some(res.name)
+        } else {
+            None
+        };
+
+        results.push(TestResultNode {
+            name: t.name.to_string(),
+            display_name,
+            stat: res.stat,
+            mesg: res.mesg,
+            level,
+            children,
+            category: t.category,
+            label: t.label.map(|s| s.to_string()),
+            description: t.description.map(|s| s.to_string()),
+            fix_hint,
+        });
     }
 
-    passed
+    results
 }
 
-fn emit_result(res: &TestResult, level: usize, quiet: bool) {
-    if !quiet {
-        let msg = match &res.mesg {
-            Some(m) => format!(": {}", m),
-            None => "".to_string(),
+/// Create a skip node for a test not matching the generation mask.
+fn make_skip_node(test: &Test, level: usize) -> TestResultNode {
+    TestResultNode {
+        name: test.name.to_string(),
+        display_name: None,
+        stat: TestState::Skip,
+        mesg: None,
+        level,
+        children: make_skip_tree(&test.sub, level + INDENT),
+        category: test.category,
+        label: test.label.map(|s| s.to_string()),
+        description: test.description.map(|s| s.to_string()),
+        fix_hint: test.fix_hint.map(|s| s.to_string()),
+    }
+}
+
+/// Recursively create skip nodes for all tests in a subtree.
+fn make_skip_tree(tests: &[Test], level: usize) -> Vec<TestResultNode> {
+    tests.iter().map(|t| make_skip_node(t, level)).collect()
+}
+
+/// Check if any node in the result tree is a failure.
+fn has_failures(results: &[TestResultNode]) -> bool {
+    for r in results {
+        if r.stat == TestState::Fail {
+            return true;
+        }
+        if has_failures(&r.children) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Render results in the default format, with parenthetical labels added.
+fn render_default(results: &[TestResultNode]) {
+    for r in results {
+        let display = r.display_name.as_deref().unwrap_or(&r.name);
+        // Skip message when display_name already encodes the status (e.g. Page flush MSR)
+        let msg = if r.display_name.is_some() {
+            String::new()
+        } else {
+            match &r.mesg {
+                Some(m) => format!(": {}", m),
+                None => String::new(),
+            }
+        };
+        let label = match &r.label {
+            Some(l) => format!(" ({})", l),
+            None => String::new(),
         };
         println!(
-            "[ {:^4} ] {:width$}- {}{}",
-            format!("{}", res.stat),
+            "[ {:^4} ] {:width$}- {}{}{}",
+            format!("{}", r.stat),
             "",
-            res.name,
+            display,
+            label,
             msg,
-            width = level
-        )
+            width = r.level
+        );
+        if r.stat == TestState::Fail {
+            if let Some(hint) = &r.fix_hint {
+                println!(
+                    "         {:width$}  ^ {} {}",
+                    "",
+                    "Hint:".blue(),
+                    hint,
+                    width = r.level
+                );
+            }
+        }
+        render_default(&r.children);
     }
 }
 
-fn test_gen_not_included(test: &Test, level: usize, quiet: bool) {
-    if !quiet {
-        let tr_skip = TestResult {
-            name: test.name.to_string(),
-            stat: TestState::Skip,
-            mesg: None,
+/// Render software version checks in the default format.
+fn render_software_versions(versions: &[SoftwareVersion]) {
+    for v in versions {
+        let stat_display = match v.status {
+            SwVersionStatus::Supported => TestState::Pass,
+            SwVersionStatus::TooOld => TestState::Fail,
+            SwVersionStatus::PermissionDenied => TestState::Fail,
+            SwVersionStatus::NotInstalled => TestState::Skip,
+            SwVersionStatus::Unknown => TestState::Skip,
+        };
+
+        let path_str = match &v.path {
+            Some(p) => format!(" [{}]", p),
+            None => String::new(),
+        };
+
+        let min_str = match &v.min_version {
+            Some(m) => format!(" (min: {})", m),
+            None => String::new(),
+        };
+
+        let detail = match v.status {
+            SwVersionStatus::NotInstalled => "Not installed".to_string(),
+            SwVersionStatus::PermissionDenied => format!("Permission denied{}", min_str),
+            _ => {
+                let ver = v.installed_version.as_deref().unwrap_or("N/A");
+                format!("{}{}", ver, min_str)
+            }
         };
 
         println!(
-            "[ {:^4} ] {:width$}- {}",
-            format!("{}", tr_skip.stat),
-            "",
-            tr_skip.name,
-            width = level
+            "[ {:^4} ] - {}{}: {} (Software)",
+            format!("{}", stat_display),
+            v.component,
+            path_str,
+            detail,
         );
-        emit_skip(&test.sub, level + INDENT, quiet);
     }
 }
 
-fn emit_skip(tests: &[Test], level: usize, quiet: bool) {
-    if !quiet {
-        for t in tests {
-            let tr_skip = TestResult {
-                name: t.name.to_string(),
-                stat: TestState::Skip,
-                mesg: None,
-            };
-
-            println!(
-                "[ {:^4} ] {:width$}- {}",
-                format!("{}", tr_skip.stat),
-                "",
-                tr_skip.name,
-                width = level
-            );
-            emit_skip(&t.sub, level + INDENT, quiet);
-        }
-    }
-}
+// ---------------------------------------------------------------------------
+// Test implementation functions (unchanged)
+// ---------------------------------------------------------------------------
 
 fn dev_sev_r() -> TestResult {
     let (stat, mesg) = match dev_sev_rw(fs::OpenOptions::new().read(true)) {
@@ -815,14 +1766,14 @@ fn snp_ioctl(test: SnpStatusTest) -> TestResult {
                 TestResult{
                             name: format!("{}", SnpStatusTest::Tcb),
                             stat: TestState::Pass,
-                            mesg: format!("TCB versions match \n\n Platform TCB version: {} \n Reported TCB version: {}", 
+                            mesg: format!("TCB versions match \n\n Platform TCB version: {} \n Reported TCB version: {}",
                                         status.platform_tcb_version, status.reported_tcb_version).into()
                         }
             } else {
                 TestResult {
                     name: format!("{}", SnpStatusTest::Tcb),
                     stat: TestState::Fail,
-                    mesg: format!("The TCB versions did NOT match \n\n Platform TCB version: {} \n Reported TCB version: {}", 
+                    mesg: format!("The TCB versions did NOT match \n\n Platform TCB version: {} \n Reported TCB version: {}",
                                     status.platform_tcb_version, status.reported_tcb_version).into(),
                 }
             }
@@ -921,12 +1872,12 @@ fn sev_ioctl(test: SevStatusTests) -> TestResult {
                         status.build.version
                     )),
                 }
-            } else if status.build.version.minor < 51 {
+            } else if !version_ge(&format!("{}", status.build.version), "1.51") {
                 TestResult {
                     name: format!("{}", SevStatusTests::Firmware),
                     stat: TestState::Fail,
                     mesg: format!(
-                        "SEV firmware version needs to be at least 1.51, 
+                        "SEV firmware version needs to be at least 1.51,
                             current firmware version: {}",
                         status.build.version
                     )
