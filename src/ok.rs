@@ -61,6 +61,28 @@ const SEV_MASK: usize = 1;
 const ES_MASK: usize = 1 << 1;
 const SNP_MASK: usize = 1 << 2;
 
+/// Detect AMD EPYC processor generation from CPUID family and model.
+fn epyc_generation() -> &'static str {
+    let res = unsafe { x86_64::__cpuid(0x0000_0001) };
+    let family_base = (res.eax >> 8) & 0xF;
+    let family_ext = (res.eax >> 20) & 0xFF;
+    let family = family_base + family_ext;
+
+    let model_base = (res.eax >> 4) & 0xF;
+    let model_ext = (res.eax >> 16) & 0xF;
+    let model = (model_ext << 4) | model_base;
+
+    match (family, model) {
+        (0x17, 0x01) => "Naples (1st Gen, Zen)",
+        (0x17, 0x31) => "Rome (2nd Gen, Zen 2)",
+        (0x19, 0x00..=0x0F) => "Milan (3rd Gen, Zen 3)",
+        (0x19, 0x10..=0x1F) => "Genoa (4th Gen, Zen 4)",
+        (0x19, 0xA0..=0xAF) => "Bergamo/Siena (4th Gen, Zen 4c)",
+        (0x1A, _) => "Turin (5th Gen, Zen 5)",
+        _ => "Unknown EPYC generation",
+    }
+}
+
 /// Category of test for grouping in verbose/JSON output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum TestCategory {
@@ -245,10 +267,16 @@ fn collect_tests() -> Vec<Test> {
                             TestState::Fail
                         };
 
+                        let mesg = if stat == TestState::Pass {
+                            Some(epyc_generation().to_string())
+                        } else {
+                            None
+                        };
+
                         TestResult {
                             name: "Microcode support".to_string(),
                             stat,
-                            mesg: None,
+                            mesg,
                         }
                     }),
                     sub: vec![],
@@ -1042,7 +1070,7 @@ fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
                 Some(l) => format!(" ({})", l),
                 None => String::new(),
             };
-            println!("  [{}] {}{}{}", "FAIL".red(), f.name, label, msg);
+            println!("  [{}] {}{}{}", "FAIL".red(), f.name, msg, label);
             if let Some(hint) = &f.fix_hint {
                 println!("    {} {}", "Hint:".blue(), hint);
             }
@@ -1459,8 +1487,8 @@ fn render_default(results: &[TestResultNode]) {
             format!("{}", r.stat),
             "",
             display,
-            label,
             msg,
+            label,
             width = r.level
         );
         if r.stat == TestState::Fail {
