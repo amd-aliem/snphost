@@ -4,10 +4,9 @@
 
 mod cert;
 mod config;
+mod ok;
 mod processor;
 mod show;
-
-mod ok;
 mod vlek_load;
 
 use cert::{export, fetch, import, verify};
@@ -31,12 +30,19 @@ struct SnpHost {
 /// Utilities for managing the SEV-SNP environment
 #[derive(Subcommand)]
 enum SnpHostCmd {
-    /// Display information about the SEV-SNP platform
+    /// Commit current firmware and TCB versions to PSP
+    Commit,
+
+    /// Modify the SNP configuration
     #[command(subcommand)]
-    Show(show::Show),
+    Config(config::ConfigCmd),
 
     /// Export a certificate chain from a kernel format file to a given directory
     Export(export::Export),
+
+    /// Retrieve content from the AMD Key Distribution Server (KDS)
+    #[command(subcommand)]
+    Fetch(fetch::Fetch),
 
     /// Import a certificate chain to a file
     Import(import::Import),
@@ -44,20 +50,13 @@ enum SnpHostCmd {
     /// Probe system for SEV-SNP support
     Ok(ok::OkArgs),
 
-    /// Modify the SNP configuration
+    /// Display information about the SEV-SNP platform
     #[command(subcommand)]
-    Config(config::ConfigCmd),
+    Show(show::Show),
 
     /// Verify a certificate chain
     #[command(subcommand)]
     Verify(verify::Verify),
-
-    /// Retrieve content from the AMD Key Distribution Server (KDS)
-    #[command(subcommand)]
-    Fetch(fetch::Fetch),
-
-    /// Commit current firmware and TCB versions to PSP
-    Commit,
 
     /// Load a VLEK to the system.
     VlekLoad(vlek_load::VlekLoad),
@@ -95,14 +94,14 @@ fn main() -> Result<()> {
 
     let snphost = SnpHost::parse();
     let result = match snphost.cmd {
-        SnpHostCmd::Show(show) => show::cmd(show),
+        SnpHostCmd::Commit => commit::cmd(),
+        SnpHostCmd::Config(subcmd) => config::cmd(subcmd),
         SnpHostCmd::Export(export) => export::cmd(export),
+        SnpHostCmd::Fetch(fetch) => fetch::cmd(fetch),
         SnpHostCmd::Import(import) => import::cmd(import),
         SnpHostCmd::Ok(args) => ok::cmd(args, snphost.quiet),
-        SnpHostCmd::Config(subcmd) => config::cmd(subcmd),
+        SnpHostCmd::Show(show) => show::cmd(show),
         SnpHostCmd::Verify(verify) => verify::cmd(verify, snphost.quiet),
-        SnpHostCmd::Fetch(fetch) => fetch::cmd(fetch),
-        SnpHostCmd::Commit => commit::cmd(),
         SnpHostCmd::VlekLoad(load) => vlek_load::cmd(load),
     };
 
