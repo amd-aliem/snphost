@@ -976,9 +976,6 @@ pub fn cmd(args: OkArgs, quiet: bool) -> Result<()> {
                 render_default(&results);
                 println!();
                 render_software_versions(&sw_versions);
-                if has_failures(&results) {
-                    println!("\nFor detailed troubleshooting, see: https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md");
-                }
             }
             OutputFormat::Short => {
                 render_short(&results, &sw_versions);
@@ -993,9 +990,15 @@ pub fn cmd(args: OkArgs, quiet: bool) -> Result<()> {
     }
 
     if has_failures(&results) {
-        Err(anyhow::anyhow!(
-            "One or more tests in snphost ok reported a failure"
-        ))
+        let msg = match args.format() {
+            OutputFormat::Verbose | OutputFormat::Json => {
+                "One or more tests in snphost ok reported a failure".to_string()
+            }
+            OutputFormat::Default | OutputFormat::Short => {
+                "One or more tests in snphost ok reported a failure. Run with --verbose for detailed troubleshooting steps".to_string()
+            }
+        };
+        Err(anyhow::anyhow!(msg))
     } else {
         Ok(())
     }
@@ -1071,9 +1074,6 @@ fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
                 None => String::new(),
             };
             println!("  [{}] {}{}{}", "FAIL".red(), f.name, msg, label);
-            if let Some(hint) = &f.fix_hint {
-                println!("    {} {}", "Hint:".blue(), hint);
-            }
         }
         for v in &sw_failures {
             let ver = v.installed_version.as_deref().unwrap_or("N/A");
@@ -1084,7 +1084,6 @@ fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
             };
             println!("  [{}] {}: {} (Software)", "FAIL".red(), v.component, detail);
         }
-        println!("\nFor detailed troubleshooting, see: https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md");
     }
 
     // Show skipped items
@@ -1491,17 +1490,6 @@ fn render_default(results: &[TestResultNode]) {
             label,
             width = r.level
         );
-        if r.stat == TestState::Fail {
-            if let Some(hint) = &r.fix_hint {
-                println!(
-                    "         {:width$}  ^ {} {}",
-                    "",
-                    "Hint:".blue(),
-                    hint,
-                    width = r.level
-                );
-            }
-        }
         render_default(&r.children);
     }
 }
