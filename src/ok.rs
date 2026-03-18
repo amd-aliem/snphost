@@ -113,8 +113,6 @@ struct Test {
     run: Box<TestFn>,
     sub: Vec<Test>,
     category: TestCategory,
-    /// Parenthetical label appended to test name, e.g. "(CPU)", "(BIOS)".
-    label: Option<&'static str>,
     /// Short description of what this test checks (for verbose mode).
     description: Option<&'static str>,
     /// Suggested fix when this test fails.
@@ -202,7 +200,6 @@ struct TestResultNode {
     level: usize,
     children: Vec<TestResultNode>,
     category: TestCategory,
-    label: Option<String>,
     description: Option<String>,
     fix_hint: Option<String>,
 }
@@ -215,7 +212,7 @@ fn collect_tests() -> Vec<Test> {
             name: "AMD CPU",
             gen_mask: SEV_MASK,
             category: CpuSupport,
-            label: Some("Proc Support"),
+
             description: Some("Checks CPU vendor string via CPUID is \"AuthenticAMD\""),
             fix_hint: Some("SEV-SNP requires an AMD processor"),
             run: Box::new(|| {
@@ -240,7 +237,7 @@ fn collect_tests() -> Vec<Test> {
                     name: "Microcode support",
                     gen_mask: SEV_MASK,
                     category: CpuSupport,
-                    label: Some("Proc Support"),
+        
                     description: Some("Verifies processor brand string contains \"EPYC\" (server-class CPU required)"),
                     fix_hint: Some("Need AMD EPYC 3rd Gen (Milan) or newer. Consumer Ryzen not supported"),
                     run: Box::new(|| {
@@ -285,7 +282,7 @@ fn collect_tests() -> Vec<Test> {
                     name: "Secure Memory Encryption (SME)",
                     gen_mask: SEV_MASK,
                     category: CpuSupport,
-                    label: Some("Proc Support"),
+        
                     description: Some("Checks CPUID 0x8000001F EAX bit 0 for SME hardware support"),
                     fix_hint: Some("Use AMD EPYC Naples or newer"),
                     run: Box::new(|| {
@@ -307,7 +304,7 @@ fn collect_tests() -> Vec<Test> {
                         name: "SME",
                         gen_mask: SEV_MASK,
                         category: BiosConfigured,
-                        label: Some("BIOS Enabled"),
+            
                         description: Some("Reads MSR 0xC0010010 (SYSCFG) bit 23 to verify SME enabled at system level"),
                         fix_hint: Some("Enable in BIOS: CBS > CPU Common > SMEE. Run: sudo modprobe msr"),
                         run: Box::new(sme_test),
@@ -318,7 +315,7 @@ fn collect_tests() -> Vec<Test> {
                     name: "Secure Encrypted Virtualization (SEV)",
                     gen_mask: SEV_MASK,
                     category: CpuSupport,
-                    label: Some("Proc Support"),
+        
                     description: Some("Checks CPUID 0x8000001F EAX bit 1 for SEV hardware support"),
                     fix_hint: Some("Ensure AMD EPYC processor with SEV support"),
                     run: Box::new(|| {
@@ -341,7 +338,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "SEV Firmware Version",
                             gen_mask: SNP_MASK,
                             category: BiosConfigured,
-                            label: None,
+                
                             description: Some("Queries /dev/sev PLATFORM_STATUS for firmware version (requires >= 1.51 for SNP)"),
                             fix_hint: Some("Run with sudo. Update BIOS to get firmware >= 1.51"),
                             run: Box::new(|| sev_ioctl(SevStatusTests::Firmware)),
@@ -351,7 +348,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "Encrypted State (SEV-ES)",
                             gen_mask: ES_MASK,
                             category: CpuSupport,
-                            label: Some("Proc Support"),
+                
                             description: Some("Checks CPUID 0x8000001F EAX bit 3 for SEV-ES hardware support"),
                             fix_hint: Some("Use AMD EPYC 2nd Gen (Rome) or newer"),
                             run: Box::new(|| {
@@ -373,7 +370,7 @@ fn collect_tests() -> Vec<Test> {
                                 name: "SEV-ES initialized",
                                 gen_mask: ES_MASK,
                                 category: PlatformInitialized,
-                                label: Some("FW Ready"),
+                    
                                 description: Some("Queries SEV platform status flags bit 8 for SEV-ES initialization"),
                                 fix_hint: Some("Run with sudo. Ensure kvm_amd loaded with sev-es=1"),
                                 run: Box::new(|| sev_ioctl(SevStatusTests::SevEs)),
@@ -384,7 +381,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "SEV initialized",
                             gen_mask: SNP_MASK,
                             category: PlatformInitialized,
-                            label: Some("FW Ready"),
+                
                             description: Some("Queries SEV platform status state field (must be Initialized or Working)"),
                             fix_hint: Some("Run with sudo. Load: sudo modprobe kvm_amd sev=1"),
                             run: Box::new(|| sev_ioctl(SevStatusTests::Sev)),
@@ -394,7 +391,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "Secure Nested Paging (SEV-SNP)",
                             gen_mask: SNP_MASK,
                             category: CpuSupport,
-                            label: Some("Proc Support"),
+                
                             description: Some("Checks CPUID 0x8000001F EAX bit 4 for SEV-SNP hardware support"),
                             fix_hint: Some("Requires AMD EPYC 3rd Gen (Milan) or newer"),
                             run: Box::new(|| {
@@ -417,7 +414,7 @@ fn collect_tests() -> Vec<Test> {
                                     name: "VM Permission Levels",
                                     gen_mask: SNP_MASK,
                                     category: CpuSupport,
-                                    label: Some("Proc Support"),
+                        
                                     description: Some("Checks CPUID 0x8000001F EAX bit 5 for VMPL hardware support"),
                                     fix_hint: Some("Check for BIOS update or verify processor model"),
                                     run: Box::new(|| {
@@ -439,7 +436,7 @@ fn collect_tests() -> Vec<Test> {
                                         name: "Number of VMPLs",
                                         gen_mask: SNP_MASK,
                                         category: CpuInfo,
-                                        label: Some("Info"),
+                            
                                         description: Some("Reads CPUID 0x8000001F EBX bits 15:12 for VMPL count (expected: 4)"),
                                         fix_hint: None,
                                         run: Box::new(|| {
@@ -459,7 +456,7 @@ fn collect_tests() -> Vec<Test> {
                                     name: "SEV-SNP",
                                     gen_mask: SNP_MASK,
                                     category: BiosConfigured,
-                                    label: Some("BIOS Enabled"),
+                        
                                     description: Some("Reads MSR 0xC0010010 (SYSCFG) bit 24 to verify SNP enabled at system level"),
                                     fix_hint: Some("Enable in BIOS: CBS > CPU Common > SNP Memory Coverage. Run: sudo modprobe msr"),
                                     run: Box::new(snp_test),
@@ -469,7 +466,7 @@ fn collect_tests() -> Vec<Test> {
                                     name: "SNP initialized",
                                     gen_mask: SNP_MASK,
                                     category: PlatformInitialized,
-                                    label: Some("FW Ready"),
+                        
                                     description: Some("Queries SNP_PLATFORM_STATUS state field = 1 (INIT state)"),
                                     fix_hint: Some("Run with sudo. Need kernel 6.11+. Load: sudo modprobe kvm_amd sev_snp=1"),
                                     run: Box::new(|| snp_ioctl(SnpStatusTest::Snp)),
@@ -478,7 +475,7 @@ fn collect_tests() -> Vec<Test> {
                                             name: "Read RMP tables",
                                             gen_mask: SNP_MASK,
                                             category: BiosConfigured,
-                                            label: Some("BIOS Enabled"),
+                                
                                             description: Some("Reads MSRs 0xC0010132 and 0xC0010133 for RMP base/end addresses"),
                                             fix_hint: Some("Enable SNP Memory Coverage in BIOS. Run: sudo modprobe msr"),
                                             run: Box::new(get_rmp_address),
@@ -488,7 +485,7 @@ fn collect_tests() -> Vec<Test> {
                                             name: "RMP table initialized",
                                             gen_mask: SNP_MASK,
                                             category: PlatformInitialized,
-                                            label: Some("FW Ready"),
+                                
                                             description: Some("Queries SNP platform status IS_RMP_INIT bit"),
                                             fix_hint: Some("Run with sudo. Need CONFIG_KVM_AMD_SEV=y. Reboot if firmware was updated"),
                                             run: Box::new(|| snp_ioctl(SnpStatusTest::Rmp)),
@@ -498,7 +495,7 @@ fn collect_tests() -> Vec<Test> {
                                             name: "Alias check",
                                             gen_mask: SNP_MASK,
                                             category: Compliance,
-                                            label: Some("Compliance"),
+                                
                                             description: Some("Queries SNP platform status ALIAS_CHECK_COMPLETE bit (CVE-2024-21944 mitigation)"),
                                             fix_hint: Some("Update SEV firmware and BIOS per AMD-SB-3015. Reboot required"),
                                             run: Box::new(|| snp_ioctl(SnpStatusTest::AliasCheck)),
@@ -512,7 +509,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "Physical address bit reduction",
                             gen_mask: SEV_MASK,
                             category: CpuInfo,
-                            label: Some("Info"),
+                
                             description: Some("Reads CPUID 0x8000001F EBX bits 11:6 for PA bit reduction value"),
                             fix_hint: None,
                             run: Box::new(|| {
@@ -531,7 +528,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "C-bit location",
                             gen_mask: SEV_MASK,
                             category: CpuInfo,
-                            label: Some("Info"),
+                
                             description: Some("Reads CPUID 0x8000001F EBX bits 5:0 for encryption bit position in page tables"),
                             fix_hint: None,
                             run: Box::new(|| {
@@ -550,7 +547,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "Number of encrypted guests supported simultaneously",
                             gen_mask: SEV_MASK,
                             category: CpuInfo,
-                            label: Some("Info"),
+                
                             description: Some("Reads CPUID 0x8000001F ECX for maximum encrypted guest count"),
                             fix_hint: None,
                             run: Box::new(|| {
@@ -570,7 +567,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "Minimum ASID value for SEV-enabled, SEV-ES disabled guest",
                             gen_mask: SEV_MASK,
                             category: CpuInfo,
-                            label: Some("Info"),
+                
                             description: Some("Reads CPUID 0x8000001F EDX for minimum SEV-only ASID value"),
                             fix_hint: None,
                             run: Box::new(|| {
@@ -591,7 +588,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "/dev/sev readable",
                             gen_mask: SEV_MASK,
                             category: PlatformInitialized,
-                            label: None,
+                
                             description: Some("Attempts to open /dev/sev device for reading"),
                             fix_hint: Some("Run with sudo. Load PSP driver: sudo modprobe ccp. Must run on baremetal"),
                             run: Box::new(dev_sev_r),
@@ -601,7 +598,7 @@ fn collect_tests() -> Vec<Test> {
                             name: "/dev/sev writable",
                             gen_mask: SEV_MASK,
                             category: PlatformInitialized,
-                            label: None,
+                
                             description: Some("Attempts to open /dev/sev device for writing"),
                             fix_hint: Some("Run with sudo. Must run on baremetal. Check SELinux/AppArmor policies"),
                             run: Box::new(dev_sev_w),
@@ -613,7 +610,7 @@ fn collect_tests() -> Vec<Test> {
                     name: "Page flush MSR",
                     gen_mask: SEV_MASK,
                     category: CpuInfo,
-                    label: Some("Info"),
+        
                     description: Some("Checks CPUID 0x8000001F EAX bit 2 for page flush MSR optimization support"),
                     fix_hint: None,
                     run: Box::new(|| {
@@ -653,7 +650,7 @@ fn collect_tests() -> Vec<Test> {
             name: "KVM supported",
             gen_mask: SEV_MASK,
             category: KvmConfig,
-            label: Some("KVM Support"),
+
             description: Some("Opens /dev/kvm and queries KVM API version via ioctl"),
             fix_hint: Some("Run with sudo. Load: sudo modprobe kvm && sudo modprobe kvm_amd. Enable SVM in BIOS"),
             run: Box::new(has_kvm_support),
@@ -662,7 +659,7 @@ fn collect_tests() -> Vec<Test> {
                     name: "SEV enabled in KVM",
                     gen_mask: SEV_MASK,
                     category: KvmConfig,
-                    label: Some("KVM Support"),
+        
                     description: Some("Reads /sys/module/kvm_amd/parameters/sev for \"1\" or \"Y\""),
                     fix_hint: Some("Set: options kvm_amd sev=1 in /etc/modprobe.d/kvm.conf"),
                     run: Box::new(|| sev_enabled_in_kvm(SevGeneration::Sev)),
@@ -672,7 +669,7 @@ fn collect_tests() -> Vec<Test> {
                     name: "SEV-ES enabled in KVM",
                     gen_mask: ES_MASK,
                     category: KvmConfig,
-                    label: Some("KVM Support"),
+        
                     description: Some("Reads /sys/module/kvm_amd/parameters/sev_es for \"1\" or \"Y\""),
                     fix_hint: Some("Set: options kvm_amd sev-es=1 in /etc/modprobe.d/kvm.conf"),
                     run: Box::new(|| sev_enabled_in_kvm(SevGeneration::Es)),
@@ -682,7 +679,7 @@ fn collect_tests() -> Vec<Test> {
                     name: "SEV-SNP enabled in KVM",
                     gen_mask: SNP_MASK,
                     category: KvmConfig,
-                    label: Some("KVM Support"),
+        
                     description: Some("Reads /sys/module/kvm_amd/parameters/sev_snp for \"1\" or \"Y\""),
                     fix_hint: Some("Set: options kvm_amd sev-snp=1 in /etc/modprobe.d/kvm.conf. Need kernel 6.11+"),
                     run: Box::new(|| sev_enabled_in_kvm(SevGeneration::Snp)),
@@ -694,7 +691,7 @@ fn collect_tests() -> Vec<Test> {
             name: "Memlock resource limit",
             gen_mask: SEV_MASK,
             category: Compliance,
-            label: Some("Compliance"),
+
             description: Some("Reads RLIMIT_MEMLOCK soft and hard limits via getrlimit syscall"),
             fix_hint: Some("Set memlock unlimited: edit /etc/security/limits.conf or systemd LimitMEMLOCK=infinity"),
             run: Box::new(memlock_rlimit),
@@ -704,7 +701,7 @@ fn collect_tests() -> Vec<Test> {
             name: "Comparing TCB values",
             gen_mask: SNP_MASK,
             category: Compliance,
-            label: Some("Compliance"),
+
             description: Some("Compares platform_tcb_version with reported_tcb_version from SNP_PLATFORM_STATUS"),
             fix_hint: Some("Run: sudo snphost commit (irreversible) or sudo snphost config set-reported-tcb"),
             run: Box::new(|| snp_ioctl(SnpStatusTest::Tcb)),
@@ -1069,10 +1066,7 @@ fn render_short(results: &[TestResultNode], sw_versions: &[SoftwareVersion]) {
                 Some(m) => format!(": {}", m),
                 None => String::new(),
             };
-            let label = match &f.label {
-                Some(l) => format!(" ({})", l),
-                None => String::new(),
-            };
+            let label = format!(" ({})", f.category);
             println!("  [{}] {}{}{}", "FAIL".red(), f.name, msg, label);
         }
         for v in &sw_failures {
@@ -1321,7 +1315,7 @@ fn to_json_test(node: &TestResultNode) -> JsonTestResult {
             TestCategory::Compliance => "compliance",
         }
         .to_string(),
-        label: node.label.clone(),
+        label: Some(node.category.to_string()),
         description: node.description.clone(),
         fix_hint: node.fix_hint.clone(),
         tcb,
@@ -1421,7 +1415,6 @@ fn collect_results(tests: &[Test], level: usize, mask: usize) -> Vec<TestResultN
             level,
             children,
             category: t.category,
-            label: t.label.map(|s| s.to_string()),
             description: t.description.map(|s| s.to_string()),
             fix_hint,
         });
@@ -1440,7 +1433,6 @@ fn make_skip_node(test: &Test, level: usize) -> TestResultNode {
         level,
         children: make_skip_tree(&test.sub, level + INDENT),
         category: test.category,
-        label: test.label.map(|s| s.to_string()),
         description: test.description.map(|s| s.to_string()),
         fix_hint: test.fix_hint.map(|s| s.to_string()),
     }
@@ -1477,10 +1469,7 @@ fn render_default(results: &[TestResultNode]) {
                 None => String::new(),
             }
         };
-        let label = match &r.label {
-            Some(l) => format!(" ({})", l),
-            None => String::new(),
-        };
+        let label = format!(" ({})", r.category);
         println!(
             "[ {:^4} ] {:width$}- {}{}{}",
             format!("{}", r.stat),
