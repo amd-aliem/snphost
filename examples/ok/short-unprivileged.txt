@@ -1,0 +1,25 @@
+$ ../../target/debug/snphost ok --short
+snphost ok: 17/35 passed, 11 failed, 7 skipped
+
+FAILURES:
+  [FAIL] SME: MSR read failed: Error Reading MSR (BIOS Configured)
+  [FAIL] SEV Firmware Version: Failed to get SEV Platform Status unable to open /dev/sev (BIOS Configured)
+  [FAIL] SEV-ES initialized: Failed to get SEV Platform Status unable to open /dev/sev (Platform Initialized)
+  [FAIL] SEV initialized: Failed to get SEV Platform Status unable to open /dev/sev (Platform Initialized)
+  [FAIL] SEV-SNP: MSR read failed: Error Reading MSR (BIOS Configured)
+  [FAIL] SNP initialized: Failed to get SNP Platform status unable to open /dev/sev (Platform Initialized)
+  [FAIL] /dev/sev readable: Not readable: Permission denied (os error 13) (Platform Initialized)
+  [FAIL] /dev/sev writable: Not writable: Permission denied (os error 13) (Platform Initialized)
+  [FAIL] KVM supported: Error reading /dev/kvm: (Permission denied (os error 13)) (KVM Config)
+  [FAIL] Comparing TCB values: Failed to get SNP Platform status unable to open /dev/sev (Compliance)
+  [FAIL] SEV Firmware: Permission denied (min: 1.51) (Software)
+
+SKIPPED:
+  [SKIP] Read RMP tables
+  [SKIP] RMP table initialized
+  [SKIP] Alias check
+  [SKIP] SEV enabled in KVM
+  [SKIP] SEV-ES enabled in KVM
+  [SKIP] SEV-SNP enabled in KVM
+  [SKIP] libvirt (Software)
+ERROR: One or more tests in snphost ok reported a failure. Run with --verbose for detailed troubleshooting steps

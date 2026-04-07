@@ -1,0 +1,92 @@
+$ sudo ../../target/debug/snphost ok --verbose
+CPU Support:
+  [ PASS ] AMD CPU
+           Checks CPU vendor string via CPUID is "AuthenticAMD"
+  [ PASS ] Microcode support: Bergamo/Siena (4th Gen, Zen 4c)
+           Verifies processor brand string contains "EPYC" (server-class CPU required)
+  [ PASS ] Secure Memory Encryption (SME)
+           Checks CPUID 0x8000001F EAX bit 0 for SME hardware support
+  [ PASS ] Secure Encrypted Virtualization (SEV)
+           Checks CPUID 0x8000001F EAX bit 1 for SEV hardware support
+  [ PASS ] Encrypted State (SEV-ES)
+           Checks CPUID 0x8000001F EAX bit 3 for SEV-ES hardware support
+  [ PASS ] Secure Nested Paging (SEV-SNP)
+           Checks CPUID 0x8000001F EAX bit 4 for SEV-SNP hardware support
+  [ PASS ] VM Permission Levels
+           Checks CPUID 0x8000001F EAX bit 5 for VMPL hardware support
+
+CPU Info:
+  [ PASS ] Number of VMPLs: 4
+           Reads CPUID 0x8000001F EBX bits 15:12 for VMPL count (expected: 4)
+  [ PASS ] Physical address bit reduction: 6
+           Reads CPUID 0x8000001F EBX bits 11:6 for PA bit reduction value
+  [ PASS ] C-bit location: 51
+           Reads CPUID 0x8000001F EBX bits 5:0 for encryption bit position in page tables
+  [ PASS ] Number of encrypted guests supported simultaneously: 1006
+           Reads CPUID 0x8000001F ECX for maximum encrypted guest count
+  [ PASS ] Minimum ASID value for SEV-enabled, SEV-ES disabled guest: 500
+           Reads CPUID 0x8000001F EDX for minimum SEV-only ASID value
+  [ PASS ] Page flush MSR: DISABLED
+           Checks CPUID 0x8000001F EAX bit 2 for page flush MSR optimization support
+
+BIOS Configured:
+  [ PASS ] SME: Enabled in MSR
+           Reads MSR 0xC0010010 (SYSCFG) bit 23 to verify SME enabled at system level
+  [ PASS ] SEV Firmware Version: 1.55
+           Queries /dev/sev PLATFORM_STATUS for firmware version (requires >= 1.51 for SNP)
+  [ PASS ] SEV-SNP: Enabled in MSR
+           Reads MSR 0xC0010010 (SYSCFG) bit 24 to verify SNP enabled at system level
+  [ PASS ] Read RMP tables: 0x18278900000 - 0x183fc9fffff
+           Reads MSRs 0xC0010132 and 0xC0010133 for RMP base/end addresses
+
+Platform Initialized:
+  [ PASS ] SEV-ES initialized
+           Queries SEV platform status flags bit 8 for SEV-ES initialization
+  [ PASS ] SEV initialized: Initialized, no guests running
+           Queries SEV platform status state field (must be Initialized or Working)
+  [ PASS ] SNP initialized
+           Queries SNP_PLATFORM_STATUS state field = 1 (INIT state)
+  [ PASS ] RMP table initialized
+           Queries SNP platform status IS_RMP_INIT bit
+  [ PASS ] /dev/sev readable
+           Attempts to open /dev/sev device for reading
+  [ PASS ] /dev/sev writable
+           Attempts to open /dev/sev device for writing
+
+KVM Config:
+  [ PASS ] KVM supported: API version: 12
+           Opens /dev/kvm and queries KVM API version via ioctl
+  [ PASS ] SEV enabled in KVM
+           Reads /sys/module/kvm_amd/parameters/sev for "1" or "Y"
+  [ PASS ] SEV-ES enabled in KVM
+           Reads /sys/module/kvm_amd/parameters/sev_es for "1" or "Y"
+  [ PASS ] SEV-SNP enabled in KVM
+           Reads /sys/module/kvm_amd/parameters/sev_snp for "1" or "Y"
+
+Compliance:
+  [ PASS ] Alias check: Completed since last system update, no aliasing addresses
+           Queries SNP platform status ALIAS_CHECK_COMPLETE bit (CVE-2024-21944 mitigation)
+  [ PASS ] Memlock resource limit: Soft: 202050342912 | Hard: 202050342912
+           Reads RLIMIT_MEMLOCK soft and hard limits via getrlimit syscall
+  [ PASS ] Comparing TCB values: TCB versions match
+
+              Platform TCB version: TCB Version:
+               Microcode:   25
+               SNP:         27
+               TEE:         0
+               Boot Loader: 10
+               FMC:         None
+              Reported TCB version: TCB Version:
+               Microcode:   25
+               SNP:         27
+               TEE:         0
+               Boot Loader: 10
+               FMC:         None
+           Compares platform_tcb_version with reported_tcb_version from SNP_PLATFORM_STATUS
+
+Installed Components:
+  [ PASS ] QEMU: 9.2.1 (min: 6.0)
+  [ SKIP ] libvirt: Not installed (min: 4.5)
+  [ PASS ] OVMF: 2025.02-3ubuntu2.2
+  [ PASS ] Kernel: 6.14.0-37-generic (min: 6.11)
+  [ PASS ] SEV Firmware: 1.55 (min: 1.51)

@@ -1,0 +1,5 @@
+$ sudo ../../target/debug/snphost ok --short
+snphost ok: 34/35 passed, 0 failed, 1 skipped
+
+SKIPPED:
+  [SKIP] libvirt (Software)

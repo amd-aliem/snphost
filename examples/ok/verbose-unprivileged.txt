@@ -1,0 +1,114 @@
+$ ../../target/debug/snphost ok --verbose
+CPU Support:
+  [ PASS ] AMD CPU
+           Checks CPU vendor string via CPUID is "AuthenticAMD"
+  [ PASS ] Microcode support: Bergamo/Siena (4th Gen, Zen 4c)
+           Verifies processor brand string contains "EPYC" (server-class CPU required)
+  [ PASS ] Secure Memory Encryption (SME)
+           Checks CPUID 0x8000001F EAX bit 0 for SME hardware support
+  [ PASS ] Secure Encrypted Virtualization (SEV)
+           Checks CPUID 0x8000001F EAX bit 1 for SEV hardware support
+  [ PASS ] Encrypted State (SEV-ES)
+           Checks CPUID 0x8000001F EAX bit 3 for SEV-ES hardware support
+  [ PASS ] Secure Nested Paging (SEV-SNP)
+           Checks CPUID 0x8000001F EAX bit 4 for SEV-SNP hardware support
+  [ PASS ] VM Permission Levels
+           Checks CPUID 0x8000001F EAX bit 5 for VMPL hardware support
+
+CPU Info:
+  [ PASS ] Number of VMPLs: 4
+           Reads CPUID 0x8000001F EBX bits 15:12 for VMPL count (expected: 4)
+  [ PASS ] Physical address bit reduction: 6
+           Reads CPUID 0x8000001F EBX bits 11:6 for PA bit reduction value
+  [ PASS ] C-bit location: 51
+           Reads CPUID 0x8000001F EBX bits 5:0 for encryption bit position in page tables
+  [ PASS ] Number of encrypted guests supported simultaneously: 1006
+           Reads CPUID 0x8000001F ECX for maximum encrypted guest count
+  [ PASS ] Minimum ASID value for SEV-enabled, SEV-ES disabled guest: 500
+           Reads CPUID 0x8000001F EDX for minimum SEV-only ASID value
+  [ PASS ] Page flush MSR: DISABLED
+           Checks CPUID 0x8000001F EAX bit 2 for page flush MSR optimization support
+
+BIOS Configured:
+  [ FAIL ] SME: MSR read failed: Error Reading MSR
+           Reads MSR 0xC0010010 (SYSCFG) bit 23 to verify SME enabled at system level
+           Recommended action: Load MSR kernel module: sudo modprobe msr
+  [ FAIL ] SEV Firmware Version: Failed to get SEV Platform Status unable to open /dev/sev
+           Queries /dev/sev PLATFORM_STATUS for firmware version (requires >= 1.51 for SNP)
+           Recommended action: Run with sudo: sudo snphost ok
+  [ FAIL ] SEV-SNP: MSR read failed: Error Reading MSR
+           Reads MSR 0xC0010010 (SYSCFG) bit 24 to verify SNP enabled at system level
+           Recommended action: Load MSR kernel module: sudo modprobe msr
+  [ SKIP ] Read RMP tables
+           Reads MSRs 0xC0010132 and 0xC0010133 for RMP base/end addresses
+
+Platform Initialized:
+  [ FAIL ] SEV-ES initialized: Failed to get SEV Platform Status unable to open /dev/sev
+           Queries SEV platform status flags bit 8 for SEV-ES initialization
+           Recommended action: Run with sudo: sudo snphost ok
+  [ FAIL ] SEV initialized: Failed to get SEV Platform Status unable to open /dev/sev
+           Queries SEV platform status state field (must be Initialized or Working)
+           Recommended action: Run with sudo: sudo snphost ok
+  [ FAIL ] SNP initialized: Failed to get SNP Platform status unable to open /dev/sev
+           Queries SNP_PLATFORM_STATUS state field = 1 (INIT state)
+           Recommended action: Run with sudo: sudo snphost ok
+  [ SKIP ] RMP table initialized
+           Queries SNP platform status IS_RMP_INIT bit
+  [ FAIL ] /dev/sev readable: Not readable: Permission denied (os error 13)
+           Attempts to open /dev/sev device for reading
+           Recommended action: Run with sudo: sudo snphost ok
+  [ FAIL ] /dev/sev writable: Not writable: Permission denied (os error 13)
+           Attempts to open /dev/sev device for writing
+           Recommended action: Run with sudo: sudo snphost ok
+
+KVM Config:
+  [ FAIL ] KVM supported: Error reading /dev/kvm: (Permission denied (os error 13))
+           Opens /dev/kvm and queries KVM API version via ioctl
+           Recommended action: Run with sudo: sudo snphost ok
+  [ SKIP ] SEV enabled in KVM
+           Reads /sys/module/kvm_amd/parameters/sev for "1" or "Y"
+  [ SKIP ] SEV-ES enabled in KVM
+           Reads /sys/module/kvm_amd/parameters/sev_es for "1" or "Y"
+  [ SKIP ] SEV-SNP enabled in KVM
+           Reads /sys/module/kvm_amd/parameters/sev_snp for "1" or "Y"
+
+Compliance:
+  [ SKIP ] Alias check
+           Queries SNP platform status ALIAS_CHECK_COMPLETE bit (CVE-2024-21944 mitigation)
+  [ PASS ] Memlock resource limit: Soft: 202050342912 | Hard: 202050342912
+           Reads RLIMIT_MEMLOCK soft and hard limits via getrlimit syscall
+  [ FAIL ] Comparing TCB values: Failed to get SNP Platform status unable to open /dev/sev
+           Compares platform_tcb_version with reported_tcb_version from SNP_PLATFORM_STATUS
+           Recommended action: Run with sudo: sudo snphost ok
+
+Installed Components:
+  [ PASS ] QEMU: 9.2.1 (min: 6.0)
+  [ SKIP ] libvirt: Not installed (min: 4.5)
+  [ PASS ] OVMF: 2025.02-3ubuntu2.2
+  [ PASS ] Kernel: 6.14.0-37-generic (min: 6.11)
+  [ FAIL ] SEV Firmware: Permission denied (min: 1.51)
+
+DETECTED ISSUES:
+  * SME: MSR read failed: Error Reading MSR
+    Hint: Load MSR kernel module: sudo modprobe msr
+  * SEV Firmware Version: Failed to get SEV Platform Status unable to open /dev/sev
+    Hint: Run with sudo: sudo snphost ok
+  * SEV-ES initialized: Failed to get SEV Platform Status unable to open /dev/sev
+    Hint: Run with sudo: sudo snphost ok
+  * SEV initialized: Failed to get SEV Platform Status unable to open /dev/sev
+    Hint: Run with sudo: sudo snphost ok
+  * SEV-SNP: MSR read failed: Error Reading MSR
+    Hint: Load MSR kernel module: sudo modprobe msr
+  * SNP initialized: Failed to get SNP Platform status unable to open /dev/sev
+    Hint: Run with sudo: sudo snphost ok
+  * /dev/sev readable: Not readable: Permission denied (os error 13)
+    Hint: Run with sudo: sudo snphost ok
+  * /dev/sev writable: Not writable: Permission denied (os error 13)
+    Hint: Run with sudo: sudo snphost ok
+  * KVM supported: Error reading /dev/kvm: (Permission denied (os error 13))
+    Hint: Run with sudo: sudo snphost ok
+  * Comparing TCB values: Failed to get SNP Platform status unable to open /dev/sev
+    Hint: Run with sudo: sudo snphost ok
+
+For detailed troubleshooting, see: https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md
+ERROR: One or more tests in snphost ok reported a failure

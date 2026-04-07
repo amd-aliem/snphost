@@ -1,0 +1,311 @@
+{
+  "tests": [
+    {
+      "name": "AMD CPU",
+      "status": "pass",
+      "category": "cpu_support",
+      "label": "CPU Support",
+      "description": "Checks CPU vendor string via CPUID is \"AuthenticAMD\"",
+      "fix_hint": "SEV-SNP requires an AMD processor",
+      "children": [
+        {
+          "name": "Microcode support",
+          "status": "pass",
+          "message": "Bergamo/Siena (4th Gen, Zen 4c)",
+          "category": "cpu_support",
+          "label": "CPU Support",
+          "description": "Verifies processor brand string contains \"EPYC\" (server-class CPU required)",
+          "fix_hint": "Need AMD EPYC 3rd Gen (Milan) or newer. Consumer Ryzen not supported"
+        },
+        {
+          "name": "Secure Memory Encryption (SME)",
+          "status": "pass",
+          "category": "cpu_support",
+          "label": "CPU Support",
+          "description": "Checks CPUID 0x8000001F EAX bit 0 for SME hardware support",
+          "fix_hint": "Use AMD EPYC Naples or newer",
+          "children": [
+            {
+              "name": "SME",
+              "status": "fail",
+              "message": "MSR read failed: Error Reading MSR",
+              "category": "bios_configured",
+              "label": "BIOS Configured",
+              "description": "Reads MSR 0xC0010010 (SYSCFG) bit 23 to verify SME enabled at system level",
+              "fix_hint": "Load MSR kernel module: sudo modprobe msr"
+            }
+          ]
+        },
+        {
+          "name": "Secure Encrypted Virtualization (SEV)",
+          "status": "pass",
+          "category": "cpu_support",
+          "label": "CPU Support",
+          "description": "Checks CPUID 0x8000001F EAX bit 1 for SEV hardware support",
+          "fix_hint": "Ensure AMD EPYC processor with SEV support",
+          "children": [
+            {
+              "name": "SEV Firmware Version",
+              "status": "fail",
+              "message": "Failed to get SEV Platform Status unable to open /dev/sev",
+              "category": "bios_configured",
+              "label": "BIOS Configured",
+              "description": "Queries /dev/sev PLATFORM_STATUS for firmware version (requires >= 1.51 for SNP)",
+              "fix_hint": "Run with sudo: sudo snphost ok"
+            },
+            {
+              "name": "Encrypted State (SEV-ES)",
+              "status": "pass",
+              "category": "cpu_support",
+              "label": "CPU Support",
+              "description": "Checks CPUID 0x8000001F EAX bit 3 for SEV-ES hardware support",
+              "fix_hint": "Use AMD EPYC 2nd Gen (Rome) or newer",
+              "children": [
+                {
+                  "name": "SEV-ES initialized",
+                  "status": "fail",
+                  "message": "Failed to get SEV Platform Status unable to open /dev/sev",
+                  "category": "platform_initialized",
+                  "label": "Platform Initialized",
+                  "description": "Queries SEV platform status flags bit 8 for SEV-ES initialization",
+                  "fix_hint": "Run with sudo: sudo snphost ok"
+                }
+              ]
+            },
+            {
+              "name": "SEV initialized",
+              "status": "fail",
+              "message": "Failed to get SEV Platform Status unable to open /dev/sev",
+              "category": "platform_initialized",
+              "label": "Platform Initialized",
+              "description": "Queries SEV platform status state field (must be Initialized or Working)",
+              "fix_hint": "Run with sudo: sudo snphost ok"
+            },
+            {
+              "name": "Secure Nested Paging (SEV-SNP)",
+              "status": "pass",
+              "category": "cpu_support",
+              "label": "CPU Support",
+              "description": "Checks CPUID 0x8000001F EAX bit 4 for SEV-SNP hardware support",
+              "fix_hint": "Requires AMD EPYC 3rd Gen (Milan) or newer",
+              "children": [
+                {
+                  "name": "VM Permission Levels",
+                  "status": "pass",
+                  "category": "cpu_support",
+                  "label": "CPU Support",
+                  "description": "Checks CPUID 0x8000001F EAX bit 5 for VMPL hardware support",
+                  "fix_hint": "Check for BIOS update or verify processor model",
+                  "children": [
+                    {
+                      "name": "Number of VMPLs",
+                      "status": "pass",
+                      "message": "4",
+                      "category": "cpu_info",
+                      "label": "CPU Info",
+                      "description": "Reads CPUID 0x8000001F EBX bits 15:12 for VMPL count (expected: 4)"
+                    }
+                  ]
+                },
+                {
+                  "name": "SEV-SNP",
+                  "status": "fail",
+                  "message": "MSR read failed: Error Reading MSR",
+                  "category": "bios_configured",
+                  "label": "BIOS Configured",
+                  "description": "Reads MSR 0xC0010010 (SYSCFG) bit 24 to verify SNP enabled at system level",
+                  "fix_hint": "Load MSR kernel module: sudo modprobe msr"
+                },
+                {
+                  "name": "SNP initialized",
+                  "status": "fail",
+                  "message": "Failed to get SNP Platform status unable to open /dev/sev",
+                  "category": "platform_initialized",
+                  "label": "Platform Initialized",
+                  "description": "Queries SNP_PLATFORM_STATUS state field = 1 (INIT state)",
+                  "fix_hint": "Run with sudo: sudo snphost ok",
+                  "children": [
+                    {
+                      "name": "Read RMP tables",
+                      "status": "skip",
+                      "category": "bios_configured",
+                      "label": "BIOS Configured",
+                      "description": "Reads MSRs 0xC0010132 and 0xC0010133 for RMP base/end addresses",
+                      "fix_hint": "Enable SNP Memory Coverage in BIOS. Run: sudo modprobe msr"
+                    },
+                    {
+                      "name": "RMP table initialized",
+                      "status": "skip",
+                      "category": "platform_initialized",
+                      "label": "Platform Initialized",
+                      "description": "Queries SNP platform status IS_RMP_INIT bit",
+                      "fix_hint": "Run with sudo. Need CONFIG_KVM_AMD_SEV=y. Reboot if firmware was updated"
+                    },
+                    {
+                      "name": "Alias check",
+                      "status": "skip",
+                      "category": "compliance",
+                      "label": "Compliance",
+                      "description": "Queries SNP platform status ALIAS_CHECK_COMPLETE bit (CVE-2024-21944 mitigation)",
+                      "fix_hint": "Update SEV firmware and BIOS per AMD-SB-3015. Reboot required"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "name": "Physical address bit reduction",
+              "status": "pass",
+              "message": "6",
+              "category": "cpu_info",
+              "label": "CPU Info",
+              "description": "Reads CPUID 0x8000001F EBX bits 11:6 for PA bit reduction value"
+            },
+            {
+              "name": "C-bit location",
+              "status": "pass",
+              "message": "51",
+              "category": "cpu_info",
+              "label": "CPU Info",
+              "description": "Reads CPUID 0x8000001F EBX bits 5:0 for encryption bit position in page tables"
+            },
+            {
+              "name": "Number of encrypted guests supported simultaneously",
+              "status": "pass",
+              "message": "1006",
+              "category": "cpu_info",
+              "label": "CPU Info",
+              "description": "Reads CPUID 0x8000001F ECX for maximum encrypted guest count"
+            },
+            {
+              "name": "Minimum ASID value for SEV-enabled, SEV-ES disabled guest",
+              "status": "pass",
+              "message": "500",
+              "category": "cpu_info",
+              "label": "CPU Info",
+              "description": "Reads CPUID 0x8000001F EDX for minimum SEV-only ASID value"
+            },
+            {
+              "name": "/dev/sev readable",
+              "status": "fail",
+              "message": "Not readable: Permission denied (os error 13)",
+              "category": "platform_initialized",
+              "label": "Platform Initialized",
+              "description": "Attempts to open /dev/sev device for reading",
+              "fix_hint": "Run with sudo: sudo snphost ok"
+            },
+            {
+              "name": "/dev/sev writable",
+              "status": "fail",
+              "message": "Not writable: Permission denied (os error 13)",
+              "category": "platform_initialized",
+              "label": "Platform Initialized",
+              "description": "Attempts to open /dev/sev device for writing",
+              "fix_hint": "Run with sudo: sudo snphost ok"
+            }
+          ]
+        },
+        {
+          "name": "Page flush MSR",
+          "status": "pass",
+          "message": "DISABLED",
+          "category": "cpu_info",
+          "label": "CPU Info",
+          "description": "Checks CPUID 0x8000001F EAX bit 2 for page flush MSR optimization support"
+        }
+      ]
+    },
+    {
+      "name": "KVM supported",
+      "status": "fail",
+      "message": "Error reading /dev/kvm: (Permission denied (os error 13))",
+      "category": "kvm_config",
+      "label": "KVM Config",
+      "description": "Opens /dev/kvm and queries KVM API version via ioctl",
+      "fix_hint": "Run with sudo: sudo snphost ok",
+      "children": [
+        {
+          "name": "SEV enabled in KVM",
+          "status": "skip",
+          "category": "kvm_config",
+          "label": "KVM Config",
+          "description": "Reads /sys/module/kvm_amd/parameters/sev for \"1\" or \"Y\"",
+          "fix_hint": "Set: options kvm_amd sev=1 in /etc/modprobe.d/kvm.conf"
+        },
+        {
+          "name": "SEV-ES enabled in KVM",
+          "status": "skip",
+          "category": "kvm_config",
+          "label": "KVM Config",
+          "description": "Reads /sys/module/kvm_amd/parameters/sev_es for \"1\" or \"Y\"",
+          "fix_hint": "Set: options kvm_amd sev-es=1 in /etc/modprobe.d/kvm.conf"
+        },
+        {
+          "name": "SEV-SNP enabled in KVM",
+          "status": "skip",
+          "category": "kvm_config",
+          "label": "KVM Config",
+          "description": "Reads /sys/module/kvm_amd/parameters/sev_snp for \"1\" or \"Y\"",
+          "fix_hint": "Set: options kvm_amd sev-snp=1 in /etc/modprobe.d/kvm.conf. Need kernel 6.11+"
+        }
+      ]
+    },
+    {
+      "name": "Memlock resource limit",
+      "status": "pass",
+      "message": "Soft: 202050342912 | Hard: 202050342912",
+      "category": "compliance",
+      "label": "Compliance",
+      "description": "Reads RLIMIT_MEMLOCK soft and hard limits via getrlimit syscall",
+      "fix_hint": "Set memlock unlimited: edit /etc/security/limits.conf or systemd LimitMEMLOCK=infinity"
+    },
+    {
+      "name": "Comparing TCB values",
+      "status": "fail",
+      "message": "TCB versions do NOT match",
+      "category": "compliance",
+      "label": "Compliance",
+      "description": "Compares platform_tcb_version with reported_tcb_version from SNP_PLATFORM_STATUS",
+      "fix_hint": "Run with sudo: sudo snphost ok"
+    }
+  ],
+  "software": [
+    {
+      "component": "QEMU",
+      "path": "/usr/bin/qemu-system-x86_64",
+      "installed_version": "9.2.1",
+      "min_version": "6.0",
+      "status": "supported"
+    },
+    {
+      "component": "libvirt",
+      "min_version": "4.5",
+      "status": "not_installed"
+    },
+    {
+      "component": "OVMF",
+      "path": "/usr/share/ovmf/OVMF.amdsev.fd",
+      "installed_version": "2025.02-3ubuntu2.2",
+      "status": "supported"
+    },
+    {
+      "component": "Kernel",
+      "installed_version": "6.14.0-37-generic",
+      "min_version": "6.11",
+      "status": "supported"
+    },
+    {
+      "component": "SEV Firmware",
+      "path": "/dev/sev",
+      "min_version": "1.51",
+      "status": "permission_denied"
+    }
+  ],
+  "summary": {
+    "passed": 17,
+    "failed": 11,
+    "skipped": 7,
+    "total": 35
+  },
+  "docs": "https://github.com/virtee/snphost/tree/main/docs/snphost-ok-reference.md"
+}

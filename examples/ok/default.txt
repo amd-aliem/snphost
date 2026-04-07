@@ -1,0 +1,50 @@
+$ sudo ../../target/debug/snphost ok
+[ PASS ] - AMD CPU (CPU Support)
+[ PASS ]   - Microcode support: Bergamo/Siena (4th Gen, Zen 4c) (CPU Support)
+[ PASS ]   - Secure Memory Encryption (SME) (CPU Support)
+[ PASS ]     - SME: Enabled in MSR (BIOS Configured)
+[ PASS ]   - Secure Encrypted Virtualization (SEV) (CPU Support)
+[ PASS ]     - SEV firmware version (BIOS Configured)
+[ PASS ]     - Encrypted State (SEV-ES) (CPU Support)
+[ PASS ]       - SEV-ES initialized (Platform Initialized)
+[ PASS ]     - SEV initialized: Initialized, no guests running (Platform Initialized)
+[ PASS ]     - Secure Nested Paging (SEV-SNP) (CPU Support)
+[ PASS ]       - VM Permission Levels (CPU Support)
+[ PASS ]         - Number of VMPLs: 4 (CPU Info)
+[ PASS ]       - SNP (BIOS Configured)
+[ PASS ]       - SNP initialized (Platform Initialized)
+[ PASS ]         - RMP table addresses (BIOS Configured)
+[ PASS ]         - RMP table initialized (Platform Initialized)
+[ PASS ]         - Alias check: Completed since last system update, no aliasing addresses (Compliance)
+[ PASS ]     - Physical address bit reduction: 6 (CPU Info)
+[ PASS ]     - C-bit location: 51 (CPU Info)
+[ PASS ]     - Number of encrypted guests supported simultaneously: 1006 (CPU Info)
+[ PASS ]     - Minimum ASID value for SEV-enabled, SEV-ES disabled guest: 500 (CPU Info)
+[ PASS ]     - /dev/sev readable (Platform Initialized)
+[ PASS ]     - /dev/sev writable (Platform Initialized)
+[ PASS ]   - Page flush MSR: DISABLED (CPU Info)
+[ PASS ] - KVM supported: API version: 12 (KVM Config)
+[ PASS ]   - SEV enabled in KVM (KVM Config)
+[ PASS ]   - SEV-ES enabled in KVM (KVM Config)
+[ PASS ]   - SEV-SNP enabled in KVM (KVM Config)
+[ PASS ] - Memlock resource limit: Soft: 202050342912 | Hard: 202050342912 (Compliance)
+[ PASS ] - Comparing TCB values: TCB versions match
+
+ Platform TCB version: TCB Version:
+  Microcode:   25
+  SNP:         27
+  TEE:         0
+  Boot Loader: 10
+  FMC:         None
+ Reported TCB version: TCB Version:
+  Microcode:   25
+  SNP:         27
+  TEE:         0
+  Boot Loader: 10
+  FMC:         None (Compliance)
+
+[ PASS ] - QEMU [/usr/bin/qemu-system-x86_64]: 9.2.1 (min: 6.0) (Software)
+[ SKIP ] - libvirt: Not installed (Software)
+[ PASS ] - OVMF [/usr/share/ovmf/OVMF.amdsev.fd]: 2025.02-3ubuntu2.2 (Software)
+[ PASS ] - Kernel: 6.14.0-37-generic (min: 6.11) (Software)
+[ PASS ] - SEV Firmware [/dev/sev]: 1.55 (min: 1.51) (Software)
