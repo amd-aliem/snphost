@@ -3,7 +3,7 @@ snphost(1)
 
 NAME
 ----
-snphost - Command line tool for managing the AMD SEV-SNP environment.
+snphost - Administrative utility for AMD SEV-SNP
 
 
 SYNOPSIS
@@ -15,26 +15,40 @@ SYNOPSIS
 
 DESCRIPTION
 -----------
-snphost is a CLI utility for managing and interacting with the AMD SEV-SNP
-firmware device of a host system.
+Administrative utility for AMD SEV-SNP
 
 
 GLOBAL OPTIONS
 --------------
-*-q, --quiet*:: Don't print any output to the console.
+*-q, --quiet*:: Don't print anything to the console
 
 
 COMMANDS
 --------
-*snphost export*::
-        usage: snphost export [der, pem] CERT-FILE DIR-PATH
+*snphost show*::
+	usage: snphost show [guests, identifier, tcb, vcek-url, vlek-url, hashsticks-url, version]
 
-        This command exports the SEV-SNP certificate chain to the directory
-        provided by DIR-PATH. User has to provide the CERT-FILE where the certs
-        are currently stored in (in GHCB format). The user must also specify if 
-        they want the certs to be exported in PEM or DER certificate format. These are the only
-        two encoding formats supported in this tool. Currently only AMD chain certificates (ARK, ASK, VCEK and VLEK)
-        are supported for export.
+        Display information about the SEV-SNP platform
+
+        snphost show guests                     Show the current number of guests
+        snphost show identifier                 Show the platform identifier
+        snphost show tcb                        Show the current platform and reported TCB version
+        snphost show vcek-url                   Show the VCEK DER download URL
+        snphost show vlek-url                   Show the VLEK DER download URL
+        snphost show hashsticks-url             Show the VLEK hashsticks download URL
+        snphost show version                    Show the platform's firmware version
+
+  options:
+        -h, --help      Show a help message.
+
+*snphost export*::
+	usage: snphost export [der, pem] CERT-FILE DIR-PATH
+
+        Export a certificate chain from a kernel format file to a given directory
+
+        ENCODING:  The format the certs will be encoded in (PEM or DER) (der, pem)
+        CERT-FILE:  File where the formatted certificates are stored
+        DIR-PATH:  The directory to write the certificates to
 
   options:
         -h, --help      Show a help message.
@@ -42,157 +56,162 @@ COMMANDS
 *snphost import*::
 	usage: snphost import DIR-PATH CERT-FILE
 
-        This command imports serialized SEV-SNP certificates to the specified CERT-FILE.
-        This CERT-FILE can then be provided to QEMU to perform extended attestation on guest.
-        Currently, only the ASK, ARK, VCEK and VLEK are supported to serialize in the tool. 
-        Note that there are a few user requirements for this command to work as intended.
+        Import a certificate chain to a file
 
-        All certificates must be located in the same directory with specific
-        names:
-                ARK certificate => ark.{pem, der}
-                ASK certificate => ask.{pem, der}
-                VCEK certificate => vcek.{pem, der}
-                VLEK certificate => vlek.{pem, der}
-
-        Not all certificates are needed in the directory, only the ones that a
-        user is looking to import to the CERT-FILE.
+        DIR-PATH:  The directory where the certificates are stored
+        CERT-FILE:  File where the formatted certificates will be stored
 
   options:
-        -h, --help      Show a help message
+        -h, --help      Show a help message.
 
 *snphost ok*::
 	usage: snphost ok
 
-        This command probes the processor, sysfs, and KVM for AMD SEV-SNP
-        related capabilities on the host and emits the results.
+        Probe system for SEV-SNP support
 
- options:
-    -h, --help          Show a help message
+  options:
+        -h, --help      Show a help message.
 
-*snphost commit*::
-	usage: snphost commit
+*snphost config*::
+	usage: snphost config [set, reset]
 
-        This command commits the current firmware and SNP platform config versions to the PSP.
-        This can't be undone and will not allow rollbacks to older versions.
+        Modify the SNP configuration
+
+        snphost config set                      Change the Platform Config (TCB and Mask chip) to the provided values
+        snphost config reset                    Reset the SEV-SNP Config to the last comitted version
 
   options:
         -h, --help      Show a help message.
 
 *snphost config set*::
-	usage: snphost config set BOOTLOADER TEE SNP-FW MICROCODE MASK-CHIP
+	usage: snphost config set BOOTLOADER TEE SNP-FW MICROCODE MASK-CHIP [FMC]
 
-        This command allows the user to change the config of the SNP platform. The user can
-        provide the desired versions of the different TCB paramerters they would like to modify.
-        The command will change the reported values by the PSP. In order to have this changes commited, the 
-        user would have to use snphost commit. The user can also provide a new mask-chip value that 
-        will change the mask chip bit field values in the config.
+        Change the Platform Config (TCB and Mask chip) to the provided values
 
-        Explanation of the different parmeters:
-        BOOTLOADER: Desired reported bootloader version
-        TEE: Desired reported PSP OS version
-        SNP-FW: Desired reported SNP Firmware level
-        MICROCODE: Desired reported patch level of all the cores
-        MASK-CHIP: Change the CHIP ID and CHIP KEY settings by changing the MASK-CHIP bits.
-                   Valid values range from 0-3 depending on what bits the user wants enabled.
-
-                   Bit[0] -> CHIP ID: Indicates that the CHIP_ID field in the attestation report
-                                      will always be 0.
-                   Bit[1] -> MASK KEY: Indicates that the VCEK is not used in attestation and guest
-                                       key derivation.
-
-                   For example, if the user would like MASK KEY to be enabled and CHIP ID disabled, 
-                   then the they would pass in a 2.
-	FMC: Current FMC firmware version
+        BOOTLOADER:  Bootloader version (Unsigned 8-bit Integer)
+        TEE:  PSP OS version (Unsigned 8-bit Integer)
+        SNP-FW:  Version of the SNP firmware (Unsigned 8-bit Integer)
+        MICROCODE:  Microcode Patch level of all the cores (Unsigned 8-bit Integer)
+        MASK-CHIP:  Change mask chip bit field (Unsigned 32-bit Integer) values by providing decimal representation of desired change (0-3). Bit[0]: CHIP_ID, Bit[1]: CHIP_KEY. Both are disabled by default
+        [FMC]:  FMC firmware version (optional)
 
   options:
         -h, --help      Show a help message.
 
-*snphost config reset*::
-	usage: snphost config reset
+*snphost verify*::
+	usage: snphost verify [certs, vlek-hashstick]
 
-        This command resets the SEV-SNP platform. This will clear all
-        persistent data managed by the platform and reset the platform configuration
-        to its last committed version.
+        Verify a certificate chain
+
+        snphost verify certs                    Verify the certificate chain
+        snphost verify vlek-hashstick           Verify the VLEK hashstick
 
   options:
         -h, --help      Show a help message.
-
-*snphost show*::
-        usage: snphost show [guests, identifier, tcb, vcek-url, version ]
-
-        This command describes the state of the SEV-SNP platform. There are
-        several platform details to describe:
-
-        Guest count:            snphost show guests
-        Platform identifier:    snphost show identifier
-        TCB version:            snphost show tcb
-        VCEK URL:               snphost show vcek-url
-        Firmware version:       snphost show version
-
- options:
-    -h, --help          Show a help message
 
 *snphost verify certs*::
 	usage: snphost verify certs DIR-PATH
 
-        This command verifies the full SEV-SNP certificate authority (CA) chain using the certificates stored in the specified directory.
-        There are two possible CA chains that can be verified:
-        The VCEK chain: ark, ask, vcek.
-        Or the VLEK chain: ark, asvk, vlek.
-        If both chains are present, the tool will default to verifying the VLEK chain.
-        The certificates mus be named as one of the following: ark, ask, asvk, vlek, vcek.
-        Followed by the format in which their stored (cert.pem or cert.der).
-        Only PEM and DER formats are supported.
+        Verify the certificate chain
 
- options:
-    -h, --help          Show a help message
+        DIR-PATH:  Path to directory containing certificates
+
+  options:
+        -h, --help      Show a help message.
 
 *snphost verify vlek-hashstick*::
-	usage: snphost verify vlek-hashstick HASHSTICK-PATH
+	usage: snphost verify vlek-hashstick HASHSTICK-FILE
 
-        This command verifies the provided VLEK hashstick against the current system configuration.
-        There are 2 verifications the hashstick needs to pass before being loaded.
-        One relates to the authentication of the actual wrapped vlek content, but this authentication can only be done at fw level.H15
-        The other is the matching the reported TCB version in the VLEK vs the one in the system.
-        This command compares the TCB version in the hashstick against the TCB version in the system, making sure these fields match.
-        Once the TCB is verified the user can load the vlek hashstick using the vlek-load command.
+        Verify the VLEK hashstick
 
- options:
-    -h, --help          Show a help message
+        HASHSTICK-FILE:  Path to the VLEK hashstick file
 
-*snphost fetch vcek*::
-	usage: snphost fetch vcek [ der, pem ] DIR-PATH [url]
+  options:
+        -h, --help      Show a help message.
 
-        This command fetches the host system's versioned chip endorsement
-        key (VCEK) and writes the encoded certificate to the directory at path
-        DIR-PATH. Users must specify which format they would like the
-        certificate to be encoded in (DER or PEM). The URL of the VCEK can be
-        explicitly set. If not explicitly set, the URL will be generated based
-        on firmware data.
+*snphost fetch*::
+	usage: snphost fetch [vek, ca, crl, hashsticks]
 
- options:
-    -h, --help          Show a help message
+        Retrieve content from the AMD Key Distribution Server (KDS)
+
+        snphost fetch vek                       Fetches the VCEK from the KDS
+        snphost fetch ca                        Fetches the CA from the KDS
+        snphost fetch crl                       Fetches the CRL from the KDS
+        snphost fetch hashsticks                Fetches the VLEK hashsticks from the KDS
+
+  options:
+        -h, --help      Show a help message.
+
+*snphost fetch vek*::
+	usage: snphost fetch vek [OPTIONS] [der, pem] PATH [URL]
+
+        Fetches the VCEK from the KDS
+
+        ENCODING:  The format in which to encode the certificate (der, pem)
+        PATH:  The path of a directory to store the encoded VEK in
+        [URL]:  The URL of the VEK. If not explicitly set, the URL will be generated based on firmware data (optional)
+
+  options:
+        -e, --endorser ENDOSER  The type of the endorsement key [default: vcek]
+        --client-cert CLIENT-CERT  The path of the client certificate
+        --private-key PRIVATE-KEY  The path of the client private key
+        -h, --help      Show a help message.
+
+*snphost fetch ca*::
+	usage: snphost fetch ca [OPTIONS] [der, pem] DIR-PATH
+
+        Fetches the CA from the KDS
+
+        ENCODING:  The format the certs are encoded in (der, pem)
+        DIR-PATH:  The directory to write the certificates to
+
+  options:
+        -e, --endorser ENDORSER Specify which endorsement certificate chain to pull, either VCEK or VLEK [default: vcek]
+        -h, --help      Show a help message.
 
 *snphost fetch crl*::
-	usage: snphost fetch crl DIR-PATH
+	usage: snphost fetch crl [OPTIONS] DIR-PATH
 
-        This command fetches the host system's certificate revokation list
-        (CRL) and writes the encoded list to the directory at path DIR-PATH.
+        Fetches the CRL from the KDS
 
- options:
-    -h, --help          Show a help message
+        DIR-PATH:  The directory to write the CRL to
+
+  options:
+        -e, --endorser ENDORSER Specify which endorsement CRL to pull, either VCEK or VLEK [default: vcek]
+        -h, --help      Show a help message.
+
+*snphost fetch hashsticks*::
+	usage: snphost fetch hashsticks [OPTIONS] PATH CLIENT-CERT PRIVATE-KEY
+
+        Fetches the VLEK hashsticks from the KDS
+
+        PATH:  The path of a directory to store the encoded VEK in
+        CLIENT-CERT:  The path of the client certificate
+        PRIVATE-KEY:  The path of the client private key
+
+  options:
+        --hwid HWID             The hwid of the requested hash stick
+        --json JSON             The path of the request file to request hashsticks for multiple machines
+        -r, --result RESULT     The filename of the raw KDS response. When specified, no preprocessing will be done
+        -h, --help      Show a help message.
+
+*snphost commit*::
+	usage: snphost commit
+
+        Commit current firmware and TCB versions to PSP
+
+  options:
+        -h, --help      Show a help message.
 
 *snphost vlek-load*::
-	usage: snphost vlek-load $HASHSTICK-FILE
+	usage: snphost vlek-load HASHSTICK-FILE
 
-        This command attempts to load the provided VLEK-HASHSTICK into the system.
-        When requesting a VLEK from the KDS, the user should receive both a VLEK certificate and a Wrapped Hashtick.
-        This command uses the hashstick file to initiate the load process.
-        If the hashstick fails verification, the command will return an error.
-        Users are encouraged to pre-verify the hashstick using the 'verify vlek-hashstick' command.
+        Load a VLEK to the system
 
- options:
-    -h, --help          Show a help message
+        HASHSTICK-FILE:  File where the VLEK hashshtick is stored
+
+  options:
+        -h, --help      Show a help message.
 
 REPORTING BUGS
 --------------
