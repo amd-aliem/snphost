@@ -7,6 +7,9 @@ mod config;
 mod processor;
 mod show;
 
+#[cfg(feature = "gen-docs")]
+mod generate_adoc;
+
 mod ok;
 mod vlek_load;
 
@@ -61,6 +64,11 @@ enum SnpHostCmd {
 
     /// Load a VLEK to the system.
     VlekLoad(vlek_load::VlekLoad),
+
+    /// Generate docs/snphost.1.adoc from the current CLI definitions
+    #[cfg(feature = "gen-docs")]
+    #[command(hide = true)]
+    GenerateManPage,
 }
 
 // Commit command
@@ -104,6 +112,12 @@ fn main() -> Result<()> {
         SnpHostCmd::Fetch(fetch) => fetch::cmd(fetch),
         SnpHostCmd::Commit => commit::cmd(),
         SnpHostCmd::VlekLoad(load) => vlek_load::cmd(load),
+        #[cfg(feature = "gen-docs")]
+        SnpHostCmd::GenerateManPage => {
+            use clap::CommandFactory;
+            print!("{}", generate_adoc::generate(&SnpHost::command()));
+            Ok(())
+        }
     };
 
     if !snphost.quiet {
